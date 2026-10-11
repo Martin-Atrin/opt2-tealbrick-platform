@@ -13,12 +13,12 @@ The release index tells Portal Core what it can deploy (apps, the bridge) and wh
 ## Trust rule
 Core (and TBD) accept the index only if `index.jws` verifies with the pinned key and `claims.indexDigest == digest(index.json body)`.
 All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`, `digest`), never a local copy (CORE §3).
-- JWS: compact, `alg EdDSA`, `kid` = RFC 7638 thumbprint, `typ tb-release-index+jws`.
+- Signed by `signReleaseIndex(body, {iat}, key)`; JWS compact, `alg EdDSA`, `kid` = RFC 7638 thumbprint, `typ tb-release-index+jws` (spec 0.1.2 `TYP.releaseIndex`).
 - Claims: `{iss: "tb:releases", aud: "tb:portal", iat, exp (iat + 180 d), schema: "opt2.release-index/v2", indexDigest, releases, offers}` (counts).
 - The JWS signs a digest, not the body, so the envelope stays far below `MAX_JWS_BYTES` however many releases exist.
 - The envelope expires after 180 days; `registry-sign` re-signs (monthly). An expired envelope = no new releases accepted; existing Core rows stay.
 
-**Interim (2026-10-11):** the index is published UNSIGNED (no `index.jws`) because the frozen spec has no `typ` for it yet (REQUESTS "platform: release index typ"). Core may read the body now; it must not treat it as trusted for stable releases until `index.jws` exists.
+**Signed since 2026-10-11 ~20:20 Bangkok (C30).** Core verifies with `verifyReleaseIndex(jws, body, { now, keys: keySetFrom(jwks, "tb:releases") })` from `@opt2-tealbrick/manifest` ≥ 0.1.0 and rejects an unsigned index. Every publish self-verifies before it commits. Unsigned mode (`TB_REGISTRY_UNSIGNED=1`) is retired.
 
 ## Body (`opt2.release-index/v2`)
 ```json
