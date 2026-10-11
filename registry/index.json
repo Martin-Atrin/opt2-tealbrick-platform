@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-11T11:33:13.804Z",
+  "generatedAt": "2026-10-11T11:39:09.751Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -153,6 +153,68 @@
       "stripePrice": {
         "test": "price_1UNB0KAG4xme4qTLMlYhN0ay",
         "live": null
+      }
+    }
+  ],
+  "harnesses": [
+    {
+      "id": "tbd-default",
+      "label": "TBD default agent — runs on this Mac",
+      "kind": "desktop",
+      "authorise": "device_approval",
+      "noAgentPath": true,
+      "assets": {
+        "icon": null,
+        "install": null,
+        "instructions": null
+      }
+    },
+    {
+      "id": "claude-desktop",
+      "label": "Claude Desktop",
+      "kind": "desktop",
+      "authorise": "pairing",
+      "noAgentPath": false,
+      "assets": {
+        "icon": null,
+        "install": null,
+        "instructions": null
+      }
+    },
+    {
+      "id": "codex-desktop",
+      "label": "Codex desktop",
+      "kind": "desktop",
+      "authorise": "pairing",
+      "noAgentPath": false,
+      "assets": {
+        "icon": null,
+        "install": null,
+        "instructions": null
+      }
+    },
+    {
+      "id": "eve",
+      "label": "Eve",
+      "kind": "agentic",
+      "authorise": "key",
+      "noAgentPath": false,
+      "assets": {
+        "icon": null,
+        "install": null,
+        "instructions": null
+      }
+    },
+    {
+      "id": "generic-mcp",
+      "label": "Any MCP harness",
+      "kind": "generic",
+      "authorise": "pairing",
+      "noAgentPath": false,
+      "assets": {
+        "icon": null,
+        "install": null,
+        "instructions": null
       }
     }
   ]
