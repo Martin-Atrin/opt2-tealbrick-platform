@@ -5,5 +5,5 @@ FROM postgres:18-bookworm@sha256:afc7e2d441324c0388fa80c3d24f733b4194a4eb7f47dd8
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /job
 COPY ops/db-backup/backup.ts /job/backup.ts
-USER postgres
+# Railway volumes are root-owned; the job only talks to Postgres over the network.
 ENTRYPOINT ["node", "/job/backup.ts"]
