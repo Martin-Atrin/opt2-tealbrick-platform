@@ -46,7 +46,7 @@ function run(cmd: string, args: string[], conn: Conn): string {
 }
 
 function psql(conn: Conn, sql: string): string {
-  return run("psql", ["--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql], conn);
+  return run("psql", ["--no-psqlrc", "-q", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql], conn);
 }
 
 function tables(url: Conn): Map<string, number> {
@@ -77,7 +77,8 @@ async function main(): Promise<void> {
     "create schema if not exists tb_ops; create table if not exists tb_ops.restore_canary (id bigserial primary key, at timestamptz not null default now()); insert into tb_ops.restore_canary default values returning id",
   )
     .split("\n")
-    .pop();
+    .find((l) => /^\d+$/.test(l));
+  if (!canary) throw new Error("canary insert returned no id");
   const stamp = new Date().toISOString().replaceAll(":", "").replace(/\..+/, "Z");
   const file = join(dir, `portal-${stamp}.dump`);
   run("pg_dump", ["-Fc", "--no-owner", "-f", file], url);
