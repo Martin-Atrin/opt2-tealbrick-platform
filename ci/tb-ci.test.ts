@@ -4,7 +4,6 @@ import {
   channelForVersion,
   checkDependencies,
   checkPackageJson,
-  envelopeClaims,
   type IndexRelease,
   mergeIndex,
   newId,
@@ -104,9 +103,6 @@ test("index merge: add, idempotent re-add, immutable content, desktop kind, offe
   assert.throws(() => mergeIndex(null, [rel({ image: null, source: src })], [], "t"), /stable release needs an image/);
   assert.equal(mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null, source: src })], [], "t").releases.length, 1);
   assert.throws(() => mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null })], [], "t"), /image or source/);
-  const env = envelopeClaims(i2, "sha256:x", 1000);
-  assert.equal(env.exp - env.iat, 180 * 86400);
-  assert.deepEqual([env.iss, env.aud, env.releases, env.offers], ["tb:releases", "tb:portal", 3, 0]);
 });
 
 test("offers validation", () => {

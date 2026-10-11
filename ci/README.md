@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v2)
+# opt2 CI standard (template ci-v3)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -16,7 +16,7 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
 | image-publish | tag `v*` only: push `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>` | build/push fails, `ghcr_token` missing |
-| release-record | tag `v*` only: signed release record as GitHub release assets + release registry entry | signing key missing, digest conflict |
+| release-record | tag `v*` only: manifest validated + digested with `@opt2-tealbrick/manifest` (pinned `TB_MANIFEST_PKG`), manifest + skills archive as release assets, entry added to the signed release index | signing key missing, invalid manifest, version mismatch, immutability conflict |
 | package-release | tag `<package>-v<semver>` only: `npm pack` of `packages/<package>` -> tarball + `.sha256` on the GitHub release | version mismatch, an in-repo dependency not released yet |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).

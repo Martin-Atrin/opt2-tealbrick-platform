@@ -33,7 +33,6 @@ export const INDEX_SCHEMA = "opt2.release-index/v2";
 export const INDEX_TYP = "tb-release-index+jws";
 export const INDEX_ISS = "tb:releases";
 export const INDEX_AUD = "tb:portal";
-export const ENVELOPE_LIFETIME_S = 180 * 86400;
 export const MANIFEST_FILE = "tealbrick.manifest.json";
 
 export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"] as const;
@@ -119,7 +118,17 @@ export interface ManifestPkg {
   manifestDigest(manifest: unknown): string;
   validateManifest(json: unknown): { ok: true; manifest: unknown } | { ok: false; errors: unknown[] };
   thumbprint(jwk: JsonWebKey): string;
-  signJws(typ: string, claims: object, key: { publicJwk: JsonWebKey; privateKey: CryptoKey; kid: string }): Promise<string>;
+  signReleaseIndex(
+    body: ReleaseIndex,
+    input: { iat: number; exp?: number },
+    key: { publicJwk: JsonWebKey; privateKey: CryptoKey; kid: string },
+  ): Promise<string>;
+  verifyReleaseIndex(
+    token: string,
+    body: ReleaseIndex,
+    ctx: { now: number; keys: unknown },
+  ): { ok: true; claims: IndexEnvelopeClaims } | { ok: false; reason?: string };
+  keySetFrom(jwks: { keys: JsonWebKey[] }, issuer: string): unknown;
 }
 
 const REQUIRED_SCRIPTS = ["typecheck", "lint", "test"] as const;
@@ -330,19 +339,6 @@ export function validateOffers(raw: unknown): Offer[] {
     }
     return r as unknown as Offer;
   });
-}
-
-export function envelopeClaims(index: ReleaseIndex, indexDigest: string, nowS: number): IndexEnvelopeClaims {
-  return {
-    iss: INDEX_ISS,
-    aud: INDEX_AUD,
-    iat: nowS,
-    exp: nowS + ENVELOPE_LIFETIME_S,
-    schema: INDEX_SCHEMA,
-    indexDigest,
-    releases: index.releases.length,
-    offers: index.offers.length,
-  };
 }
 
 export function serializeIndex(index: ReleaseIndex): string {
@@ -627,7 +623,7 @@ async function loadManifestPkg(root: string): Promise<ManifestPkg> {
     entry = join(pkgDir, rel);
   }
   const mod = (await import(pathToFileURL(entry).href)) as Partial<ManifestPkg>;
-  for (const f of ["digest", "manifestDigest", "validateManifest", "thumbprint", "signJws"] as const)
+  for (const f of ["digest", "manifestDigest", "validateManifest", "thumbprint", "signReleaseIndex", "verifyReleaseIndex", "keySetFrom"] as const)
     if (typeof mod[f] !== "function") fail(`@opt2-tealbrick/manifest does not export ${f}`);
   return mod as ManifestPkg;
 }
@@ -670,7 +666,15 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     const offers = validateOffers(offersText ? JSON.parse(offersText) : []);
     const index = mergeIndex(prev, add, offers, new Date().toISOString());
     const body = serializeIndex(index);
-    const jws = key && m ? `${await m.signJws(INDEX_TYP, envelopeClaims(index, m.digest(index), Math.floor(Date.now() / 1000)), key)}\n` : null;
+    let jws: string | null = null;
+    if (key && m) {
+      const nowS = Math.floor(Date.now() / 1000);
+      const token = await m.signReleaseIndex(index, { iat: nowS }, key);
+      const keys = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../registry/keys.json"), "utf8")) as { keys: JsonWebKey[] };
+      const check = m.verifyReleaseIndex(token, JSON.parse(body) as ReleaseIndex, { now: nowS, keys: m.keySetFrom(keys, INDEX_ISS) });
+      if (!check.ok) fail(`registry: self-verification of the signed index failed: ${check.reason ?? "refused"}`);
+      jws = `${token}\n`;
+    }
     const commit = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits/${headSha}`);
     const hasEnvelope = (await ghFile(ENVELOPE_PATH, headSha)) !== null;
     const tree = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/trees`, {
