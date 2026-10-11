@@ -15,6 +15,7 @@ import {
   tarballName,
   validateBridgeRuntime,
   validateConfig,
+  validateHarnesses,
   validateOffers,
   versionFromTag,
   workspaceGlobs,
@@ -204,5 +205,32 @@ test("workspace globs and package tags", () => {
   assert.equal(
     releaseUrl("opt2-tealbrick-sdk", "manifest", "@opt2-tealbrick/manifest", "0.1.0"),
     "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz",
+  );
+});
+
+test("harnesses validation (C40)", () => {
+  const h = {
+    id: "claude-desktop",
+    label: "Claude Desktop",
+    kind: "desktop",
+    authorise: "pairing",
+    noAgentPath: false,
+    assets: { icon: null, install: null, instructions: null },
+  };
+  assert.equal(validateHarnesses([h]).length, 1);
+  assert.throws(() => validateHarnesses([h, h]), /duplicate/);
+  assert.throws(() => validateHarnesses([{ ...h, authorise: "url" }]), /authorise/);
+  assert.throws(() => validateHarnesses([{ ...h, assets: { icon: "https://evil.example/x.svg", install: null, instructions: null } }]), /assets/);
+  assert.throws(
+    () =>
+      validateHarnesses([
+        { ...h, noAgentPath: true },
+        { ...h, id: "tbd-default", noAgentPath: true },
+      ]),
+    /no-agent/,
+  );
+  assert.deepEqual(
+    mergeIndex(null, [], [], "t", validateHarnesses([h])).harnesses.map((x) => x.id),
+    ["claude-desktop"],
   );
 });

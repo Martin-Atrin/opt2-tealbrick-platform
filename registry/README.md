@@ -8,6 +8,7 @@ The release index tells Portal Core what it can deploy (apps, the bridge) and wh
 | Index body | `registry/index.json` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.json` (also raw on `main`) |
 | Signed envelope | `registry/index.jws` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.jws` |
 | Offers (reviewed input) | `registry/offers.json` | change by PR only; the next publish carries them |
+| Harness options (reviewed input, C40) | `registry/harnesses.json` | change by PR only; the next publish carries them |
 | Public signing key | `registry/keys.json` (JWKS, Ed25519) | raw on `main`; Core pins it in config (`RELEASE_INDEX_PUBLIC_JWKS`) |
 
 ## Trust rule
@@ -33,6 +34,7 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
     "minOs": null, "notarized": null, "upgradeFrom": "*",
     "repo": "Martin-Atrin/opt2-tealbrick-knowledge", "commit": "<sha>", "tag": "v0.1.0", "publishedAt": "..."
   }],
+  "harnesses": [{ "id": "claude-desktop", "label": "Claude Desktop", "kind": "desktop", "authorise": "pairing", "noAgentPath": false, "assets": { "icon": null, "install": null, "instructions": null } }],
   "offers": [{
     "id": "off_01M4...", "kind": "single", "name": "Knowledge", "products": ["knowledge"], "major": 0,
     "amount": 9900, "currency": "usd", "taxNote": "...", "stripePrice": { "test": "price_...", "live": null }
@@ -43,6 +45,7 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
 - Exactly one of `image` (pinned by digest), `source` (C29 interim, dev only: `{repo, ref: <commit sha>, dockerfile}`), `artifact` (desktop: `{url, sha256}` of the notarized download, plus `minOs`, `notarized`).
 - `runtime` (kind `bridge` only; `null` elsewhere, apps use their manifest `runtime`): `{port (public), internalPort (private network), healthPath (liveness), readyPath (ready after enrolment), volumes: [{mountPath, backup}], env: [{name, source: portal | provider-secret | public-url | fixed, value? (fixed only)}]}`. Core's deploy recipe: `provider-secret` = Railway `${{secret(43, "<base64url alphabet>")}}` (ops/KEYS.md), `portal` = values Core issues (Portal URL, one-time K6 code), `public-url` = the service's public domain, `backup: true` = `volumeInstanceBackupScheduleUpdate(kinds: [DAILY, WEEKLY])` (C28/S7). CI bridge releases read it from `bridge-runtime.json` next to the bridge Dockerfile; source records from `registry/inputs/`.
 - A stable release always has `image`. Releases are immutable: `(product, version, channel)` never changes content (a dev source build and the later stable image of the same version are two releases).
+- `harnesses` (C40): harness options as DATA; Core syncs them into its Agent Registry (no seed migration in the Core image). Source: reviewed `registry/harnesses.json` (PR only). Entry: `{id, label, kind: desktop | agentic | generic, authorise: device_approval | pairing | key, noAgentPath (true for the one "I do not have an agent" row = TBD), assets: {icon, install, instructions}}` where each asset is an opt2 GitHub URL or null. Seed: `tbd-default` (device_approval, noAgentPath), `claude-desktop` (pairing), `codex-desktop` (pairing), `eve` (key), `generic-mcp` (pairing). Not counted in the JWS claims, but covered by `indexDigest` like every other field.
 - Offers: $99 per app per major, no bundles (C29). `stripePrice.test` is used in opt2 (Stripe TEST); `live` stays null until cutover. Core verifies each price against Stripe at sync (active, one-time, amount, currency, tax behaviour, livemode).
 
 ## Writers (only these)

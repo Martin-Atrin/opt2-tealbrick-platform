@@ -1,0 +1,42 @@
+[
+  {
+    "id": "tbd-default",
+    "label": "TBD default agent — runs on this Mac",
+    "kind": "desktop",
+    "authorise": "device_approval",
+    "noAgentPath": true,
+    "assets": { "icon": null, "install": null, "instructions": null }
+  },
+  {
+    "id": "claude-desktop",
+    "label": "Claude Desktop",
+    "kind": "desktop",
+    "authorise": "pairing",
+    "noAgentPath": false,
+    "assets": { "icon": null, "install": null, "instructions": null }
+  },
+  {
+    "id": "codex-desktop",
+    "label": "Codex desktop",
+    "kind": "desktop",
+    "authorise": "pairing",
+    "noAgentPath": false,
+    "assets": { "icon": null, "install": null, "instructions": null }
+  },
+  {
+    "id": "eve",
+    "label": "Eve",
+    "kind": "agentic",
+    "authorise": "key",
+    "noAgentPath": false,
+    "assets": { "icon": null, "install": null, "instructions": null }
+  },
+  {
+    "id": "generic-mcp",
+    "label": "Any MCP harness",
+    "kind": "generic",
+    "authorise": "pairing",
+    "noAgentPath": false,
+    "assets": { "icon": null, "install": null, "instructions": null }
+  }
+]

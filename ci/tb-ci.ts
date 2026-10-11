@@ -28,6 +28,7 @@ export const PLATFORM_REPO = "opt2-tealbrick-platform";
 export const INDEX_PATH = "registry/index.json";
 export const ENVELOPE_PATH = "registry/index.jws";
 export const OFFERS_PATH = "registry/offers.json";
+export const HARNESSES_PATH = "registry/harnesses.json";
 export const REGISTRY_RELEASE_TAG = "registry";
 export const INDEX_SCHEMA = "opt2.release-index/v2";
 export const INDEX_TYP = "tb-release-index+jws";
@@ -124,11 +125,23 @@ export interface Offer {
   stripePrice: { test: string | null; live: string | null };
 }
 
+/** C40: harness options as data (Core syncs them; no seed migration in Core). */
+export interface Harness {
+  id: string;
+  label: string;
+  kind: "desktop" | "agentic" | "generic";
+  authorise: "device_approval" | "pairing" | "key";
+  /** true = the "I do not have an agent" path (download the desktop app). */
+  noAgentPath: boolean;
+  assets: { icon: string | null; install: string | null; instructions: string | null };
+}
+
 export interface ReleaseIndex {
   schema: typeof INDEX_SCHEMA;
   generatedAt: string;
   releases: IndexRelease[];
   offers: Offer[];
+  harnesses: Harness[];
 }
 
 /** Claims of the signed envelope (the JWS stays far below MAX_JWS_BYTES; the body is index.json). */
@@ -327,7 +340,7 @@ export function releaseUrl(repo: string, dir: string, name: string, version: str
 
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
  *  A dev source build (C29) and the later stable image of the same version are two releases. */
-export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string): ReleaseIndex {
+export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string, harnesses: Harness[] = []): ReleaseIndex {
   const releases = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null }));
   for (const r of add) {
     if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
@@ -344,7 +357,32 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
     releases.push(r);
   }
   releases.sort((x, y) => (x.product === y.product ? x.publishedAt.localeCompare(y.publishedAt) : x.product.localeCompare(y.product)));
-  return { schema: INDEX_SCHEMA, generatedAt: now, releases, offers };
+  return { schema: INDEX_SCHEMA, generatedAt: now, releases, offers, harnesses };
+}
+
+export function validateHarnesses(raw: unknown): Harness[] {
+  if (!Array.isArray(raw)) throw new Error("harnesses.json must be an array");
+  const ids = new Set<string>();
+  const assetOk = (v: unknown) =>
+    v === null || (typeof v === "string" && /^https:\/\/(github\.com|raw\.githubusercontent\.com)\/Martin-Atrin\/opt2-tealbrick-/.test(v));
+  const out = raw.map((h, i) => {
+    const r = h as Record<string, unknown>;
+    const bad = (m: string): never => {
+      throw new Error(`harnesses[${i}]: ${m}`);
+    };
+    if (typeof r.id !== "string" || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(r.id)) bad("id (lowercase slug)");
+    if (ids.has(r.id as string)) bad("duplicate id");
+    ids.add(r.id as string);
+    if (typeof r.label !== "string" || !r.label) bad("label");
+    if (!["desktop", "agentic", "generic"].includes(r.kind as string)) bad("kind desktop|agentic|generic");
+    if (!["device_approval", "pairing", "key"].includes(r.authorise as string)) bad("authorise device_approval|pairing|key");
+    if (typeof r.noAgentPath !== "boolean") bad("noAgentPath boolean");
+    const a = r.assets as Record<string, unknown> | undefined;
+    if (!a || !["icon", "install", "instructions"].every((k) => k in a && assetOk(a[k]))) bad("assets {icon, install, instructions}: opt2 GitHub URL or null");
+    return r as unknown as Harness;
+  });
+  if (out.filter((h) => h.noAgentPath).length > 1) throw new Error("at most one harness may be the no-agent path");
+  return out;
 }
 
 export function validateOffers(raw: unknown): Offer[] {
@@ -698,7 +736,9 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     if (prev && prev.schema !== INDEX_SCHEMA) fail(`registry: unexpected schema ${prev.schema}`);
     const offersText = await ghFile(OFFERS_PATH, headSha);
     const offers = validateOffers(offersText ? JSON.parse(offersText) : []);
-    const index = mergeIndex(prev, add, offers, new Date().toISOString());
+    const harnessesText = await ghFile(HARNESSES_PATH, headSha);
+    const harnesses = validateHarnesses(harnessesText ? JSON.parse(harnessesText) : []);
+    const index = mergeIndex(prev, add, offers, new Date().toISOString(), harnesses);
     const body = serializeIndex(index);
     let jws: string | null = null;
     if (key && m) {
