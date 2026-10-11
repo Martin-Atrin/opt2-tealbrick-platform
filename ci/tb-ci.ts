@@ -414,6 +414,30 @@ export function validateOffers(raw: unknown): Offer[] {
   });
 }
 
+/** C42: Railway refuses images with a `VOLUME` instruction (it mounts volumes itself). Returns offending line numbers. */
+export function dockerfileVolumeLines(text: string): number[] {
+  const out: number[] = [];
+  let continued = false;
+  text.split(/\r?\n/).forEach((line, i) => {
+    const t = line.trim();
+    const isInstructionStart = !continued && t !== "" && !t.startsWith("#");
+    if (isInstructionStart && /^VOLUME(\s|\[|$)/i.test(t)) out.push(i + 1);
+    if (t.startsWith("#") && !continued) return;
+    continued = t.endsWith("\\");
+  });
+  return out;
+}
+
+function findDockerfiles(root: string, dir = "", acc: string[] = []): string[] {
+  for (const e of readdirSync(join(root, dir), { withFileTypes: true })) {
+    if (["node_modules", ".git", ".tb-ci", "dist"].includes(e.name)) continue;
+    const rel = dir ? `${dir}/${e.name}` : e.name;
+    if (e.isDirectory()) findDockerfiles(root, rel, acc);
+    else if (/^Dockerfile(\..+)?$|\.Dockerfile$/i.test(e.name)) acc.push(rel);
+  }
+  return acc;
+}
+
 export function serializeIndex(index: ReleaseIndex): string {
   return `${JSON.stringify(index, null, 2)}\n`;
 }
@@ -560,6 +584,11 @@ async function cmdSetup(): Promise<void> {
   for (const im of cfg.images) {
     if (!existsSync(join(root, im.dockerfile))) errors.push(`image ${im.name}: ${im.dockerfile} not found`);
     if (im.manifest && !existsSync(join(root, im.manifest))) errors.push(`image ${im.name}: manifest ${im.manifest} not found`);
+  }
+  for (const df of findDockerfiles(root)) {
+    const lines = dockerfileVolumeLines(readFileSync(join(root, df), "utf8"));
+    if (lines.length)
+      errors.push(`${df}: VOLUME instruction on line ${lines.join(", ")} (C42: Railway mounts volumes itself; declare volumes in the manifest runtime)`);
   }
   for (const u of new Set(urls)) {
     const res = await fetch(u, { method: "HEAD", redirect: "follow" });
@@ -940,6 +969,8 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
   const raw = (path: string) => `https://raw.githubusercontent.com/${OWNER}/${repo}/${ref}/${path}`;
   const df = await fetch(raw(dockerfile));
   if (!df.ok) fail(`${dockerfile} not found at ${repo}@${ref} (HTTP ${df.status}); push it first`);
+  const volumeLines = dockerfileVolumeLines(await df.text());
+  if (volumeLines.length) fail(`${dockerfile} at ${repo}@${ref} has a VOLUME instruction on line ${volumeLines.join(", ")} (C42); remove it and push`);
   let manifestDigest: string | null = null;
   let skillsDigest: string | null = null;
   let m: ManifestPkg | null = null;

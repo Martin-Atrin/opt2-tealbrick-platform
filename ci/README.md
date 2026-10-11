@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v3)
+# opt2 CI standard (template ci-v4)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -9,7 +9,7 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | Step | What it does | Fails when |
 |---|---|---|
 | secret-scan | gitleaks over the working tree (redacted output) | any finding |
-| setup | fetches `tb-ci.ts` at the pinned tag, checks its sha256, template drift, `tealbrick-ci.json`, package rules | drift, bad config, `private` missing, required script missing, no lockfile |
+| setup | fetches `tb-ci.ts` at the pinned tag, checks its sha256, template drift, `tealbrick-ci.json`, package rules | drift, bad config, `private` missing, required script missing, no lockfile, any `VOLUME` instruction in any Dockerfile (C42) |
 | install | `pnpm install --frozen-lockfile` (or `npm ci`) per path | lockfile out of date |
 | typecheck / lint / unit | root scripts `typecheck`, `lint`, `test` | non-zero exit |
 | conformance | root script `conformance` (required for kind miniapp, bridge) | non-zero exit |

@@ -4,6 +4,7 @@ import {
   channelForVersion,
   checkDependencies,
   checkPackageJson,
+  dockerfileVolumeLines,
   type IndexRelease,
   mergeIndex,
   newId,
@@ -228,4 +229,12 @@ test("harnesses validation (frozen HarnessOption, C40a)", () => {
     mergeIndex(null, [], [], "t", validateHarnesses([h])).harnesses.map((x) => x.id),
     ["claude-desktop"],
   );
+});
+
+test("C42: VOLUME instruction detection", () => {
+  assert.deepEqual(dockerfileVolumeLines('FROM node\nVOLUME ["/data"]\nCMD x'), [2]);
+  assert.deepEqual(dockerfileVolumeLines("FROM node\n  volume /data\n"), [2]);
+  assert.deepEqual(dockerfileVolumeLines("FROM node\n# VOLUME /data\nRUN mkdir -p /data && \\\n  echo VOLUME\nENV TB_DATA_DIR=/data"), []);
+  assert.deepEqual(dockerfileVolumeLines("FROM node\nRUN echo a \\\n VOLUME /x\n"), [], "continuation lines are not instructions");
+  assert.deepEqual(dockerfileVolumeLines("FROM node\nENV VOLUME_DIR=/data\n"), []);
 });
