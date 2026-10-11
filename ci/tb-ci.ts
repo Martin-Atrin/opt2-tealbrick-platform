@@ -125,15 +125,16 @@ export interface Offer {
   stripePrice: { test: string | null; live: string | null };
 }
 
-/** C40: harness options as data (Core syncs them; no seed migration in Core). */
+/** C40/C40a: harness options as data, exactly the frozen PORTAL-API `HarnessOption` (types/routes.ts). Core syncs them. */
 export interface Harness {
   id: string;
+  kind: "desktop" | "agentic_system" | "other";
   label: string;
-  kind: "desktop" | "agentic" | "generic";
-  authorise: "device_approval" | "pairing" | "key";
+  /** Asset URL served from the release of the harness, or null. */
+  icon: string | null;
+  authorise: "device_approval" | "instruction_set" | "url";
   /** true = the "I do not have an agent" path (download the desktop app). */
   noAgentPath: boolean;
-  assets: { icon: string | null; install: string | null; instructions: string | null };
 }
 
 export interface ReleaseIndex {
@@ -363,22 +364,22 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
 export function validateHarnesses(raw: unknown): Harness[] {
   if (!Array.isArray(raw)) throw new Error("harnesses.json must be an array");
   const ids = new Set<string>();
-  const assetOk = (v: unknown) =>
-    v === null || (typeof v === "string" && /^https:\/\/(github\.com|raw\.githubusercontent\.com)\/Martin-Atrin\/opt2-tealbrick-/.test(v));
+  const keys = ["authorise", "icon", "id", "kind", "label", "noAgentPath"];
   const out = raw.map((h, i) => {
     const r = h as Record<string, unknown>;
     const bad = (m: string): never => {
       throw new Error(`harnesses[${i}]: ${m}`);
     };
+    if (Object.keys(r).sort().join(",") !== keys.join(",")) bad(`fields must be exactly ${keys.join(", ")} (HarnessOption)`);
     if (typeof r.id !== "string" || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(r.id)) bad("id (lowercase slug)");
     if (ids.has(r.id as string)) bad("duplicate id");
     ids.add(r.id as string);
     if (typeof r.label !== "string" || !r.label) bad("label");
-    if (!["desktop", "agentic", "generic"].includes(r.kind as string)) bad("kind desktop|agentic|generic");
-    if (!["device_approval", "pairing", "key"].includes(r.authorise as string)) bad("authorise device_approval|pairing|key");
+    if (!["desktop", "agentic_system", "other"].includes(r.kind as string)) bad("kind desktop|agentic_system|other");
+    if (!["device_approval", "instruction_set", "url"].includes(r.authorise as string)) bad("authorise device_approval|instruction_set|url");
     if (typeof r.noAgentPath !== "boolean") bad("noAgentPath boolean");
-    const a = r.assets as Record<string, unknown> | undefined;
-    if (!a || !["icon", "install", "instructions"].every((k) => k in a && assetOk(a[k]))) bad("assets {icon, install, instructions}: opt2 GitHub URL or null");
+    if (r.icon !== null && !(typeof r.icon === "string" && /^https:\/\/(github\.com|raw\.githubusercontent\.com)\/Martin-Atrin\/opt2-tealbrick-/.test(r.icon)))
+      bad("icon: opt2 GitHub URL or null");
     return r as unknown as Harness;
   });
   if (out.filter((h) => h.noAgentPath).length > 1) throw new Error("at most one harness may be the no-agent path");

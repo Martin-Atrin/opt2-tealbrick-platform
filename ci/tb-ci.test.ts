@@ -208,19 +208,14 @@ test("workspace globs and package tags", () => {
   );
 });
 
-test("harnesses validation (C40)", () => {
-  const h = {
-    id: "claude-desktop",
-    label: "Claude Desktop",
-    kind: "desktop",
-    authorise: "pairing",
-    noAgentPath: false,
-    assets: { icon: null, install: null, instructions: null },
-  };
+test("harnesses validation (frozen HarnessOption, C40a)", () => {
+  const h = { id: "claude-desktop", kind: "desktop", label: "Claude Desktop", icon: null, authorise: "instruction_set", noAgentPath: false };
   assert.equal(validateHarnesses([h]).length, 1);
   assert.throws(() => validateHarnesses([h, h]), /duplicate/);
-  assert.throws(() => validateHarnesses([{ ...h, authorise: "url" }]), /authorise/);
-  assert.throws(() => validateHarnesses([{ ...h, assets: { icon: "https://evil.example/x.svg", install: null, instructions: null } }]), /assets/);
+  assert.throws(() => validateHarnesses([{ ...h, authorise: "pairing" }]), /authorise/);
+  assert.throws(() => validateHarnesses([{ ...h, kind: "agentic" }]), /kind/);
+  assert.throws(() => validateHarnesses([{ ...h, assets: {} }]), /exactly/);
+  assert.throws(() => validateHarnesses([{ ...h, icon: "https://evil.example/x.svg" }]), /icon/);
   assert.throws(
     () =>
       validateHarnesses([
