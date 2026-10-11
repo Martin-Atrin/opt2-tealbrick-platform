@@ -999,12 +999,19 @@ function cmdAdopt(args: string[]): void {
   const here = dirname(fileURLToPath(import.meta.url));
   const target = resolve(dir);
   mkdirSync(join(target, ".woodpecker"), { recursive: true });
-  writeFileSync(join(target, ".woodpecker/ci.yaml"), readFileSync(join(here, "woodpecker/ci.yaml")));
+  const tpl = readFileSync(join(here, "woodpecker/ci.yaml"), "utf8");
+  writeFileSync(join(target, ".woodpecker/ci.yaml"), tpl);
+  const ref = /TB_CI_REF: (\S+)/.exec(tpl)?.[1] ?? "main";
+  const schemaUrl = `https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/${ref}/ci/tealbrick-ci.schema.json`;
   rmSync(join(target, ".woodpecker/secret-scan.yaml"), { force: true });
   const cfgPath = join(target, "tealbrick-ci.json");
   if (!existsSync(cfgPath)) {
-    const cfg = { $schema: `https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/main/ci/tealbrick-ci.schema.json`, kind, paths: ["."], images: [] };
+    const cfg = { $schema: schemaUrl, kind, paths: ["."], images: [] };
     writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  } else {
+    // keep the repo's settings; pin the schema to the template version (the schema may change between versions)
+    const cur = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+    writeFileSync(cfgPath, `${JSON.stringify({ ...cur, $schema: schemaUrl }, null, 2)}\n`);
   }
   const gi = join(target, ".gitignore");
   const giText = existsSync(gi) ? readFileSync(gi, "utf8") : "";
