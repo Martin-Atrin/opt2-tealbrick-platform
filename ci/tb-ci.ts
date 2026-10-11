@@ -693,7 +693,7 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       const rel = await ensureRelease(PLATFORM_REPO, REGISTRY_RELEASE_TAG, false, nc.json.sha as string);
       await uploadAsset(PLATFORM_REPO, rel, "index.json", body);
       if (jws) await uploadAsset(PLATFORM_REPO, rel, "index.jws", jws);
-      log(`${msg}; published https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/index.jws`);
+      log(`${msg}; published https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${jws ? "index.jws" : "index.json"}`);
       return;
     }
     log(`registry: main moved (HTTP ${upd.status}), retry ${attempt}/5`);
