@@ -135,6 +135,13 @@ export interface Harness {
   authorise: "device_approval" | "instruction_set" | "url";
   /** true = the "I do not have an agent" path (download the desktop app). */
   noAgentPath: boolean;
+  /** C43: InstructionSet-shaped step template. Placeholders: {{mcpUrl}}, {{agentId}} (Core), {{pairingCode}} (GUI). */
+  instructions: HarnessStep[];
+}
+export interface HarnessStep {
+  title: string;
+  detail: string;
+  copy?: { kind: "command" | "json" | "url" | "text"; value: string };
 }
 
 export interface ReleaseIndex {
@@ -364,13 +371,31 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
 export function validateHarnesses(raw: unknown): Harness[] {
   if (!Array.isArray(raw)) throw new Error("harnesses.json must be an array");
   const ids = new Set<string>();
-  const keys = ["authorise", "icon", "id", "kind", "label", "noAgentPath"];
+  const keys = ["authorise", "icon", "id", "instructions", "kind", "label", "noAgentPath"];
+  const PLACEHOLDERS = new Set(["mcpUrl", "agentId", "pairingCode"]);
+  const checkText = (v: unknown, where: string, bad: (m: string) => never) => {
+    if (typeof v !== "string" || !v) bad(`${where} must be a non-empty string`);
+    for (const m of (v as string).matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) if (!PLACEHOLDERS.has(m[1])) bad(`${where}: unknown placeholder {{${m[1]}}}`);
+  };
   const out = raw.map((h, i) => {
     const r = h as Record<string, unknown>;
     const bad = (m: string): never => {
       throw new Error(`harnesses[${i}]: ${m}`);
     };
-    if (Object.keys(r).sort().join(",") !== keys.join(",")) bad(`fields must be exactly ${keys.join(", ")} (HarnessOption)`);
+    if (Object.keys(r).sort().join(",") !== keys.join(",")) bad(`fields must be exactly ${keys.join(", ")} (HarnessOption + instructions)`);
+    if (!Array.isArray(r.instructions) || r.instructions.length === 0) bad("instructions: at least one step");
+    (r.instructions as Record<string, unknown>[]).forEach((st, j) => {
+      const extra = Object.keys(st).filter((k) => !["title", "detail", "copy"].includes(k));
+      if (extra.length) bad(`instructions[${j}]: unknown field ${extra.join(",")}`);
+      checkText(st.title, `instructions[${j}].title`, bad);
+      checkText(st.detail, `instructions[${j}].detail`, bad);
+      if (st.copy !== undefined) {
+        const c = st.copy as Record<string, unknown>;
+        if (!["command", "json", "url", "text"].includes(c.kind as string) || Object.keys(c).sort().join(",") !== "kind,value")
+          bad(`instructions[${j}].copy must be {kind: command|json|url|text, value}`);
+        checkText(c.value, `instructions[${j}].copy.value`, bad);
+      }
+    });
     if (typeof r.id !== "string" || !/^[a-z0-9][a-z0-9-]{1,40}$/.test(r.id)) bad("id (lowercase slug)");
     if (ids.has(r.id as string)) bad("duplicate id");
     ids.add(r.id as string);

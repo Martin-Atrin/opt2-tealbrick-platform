@@ -210,12 +210,23 @@ test("workspace globs and package tags", () => {
 });
 
 test("harnesses validation (frozen HarnessOption, C40a)", () => {
-  const h = { id: "claude-desktop", kind: "desktop", label: "Claude Desktop", icon: null, authorise: "instruction_set", noAgentPath: false };
+  const h = {
+    id: "claude-desktop",
+    kind: "desktop",
+    label: "Claude Desktop",
+    icon: null,
+    authorise: "instruction_set",
+    noAgentPath: false,
+    instructions: [{ title: "Add connector", detail: "Paste the URL.", copy: { kind: "url", value: "{{mcpUrl}}" } }],
+  };
   assert.equal(validateHarnesses([h]).length, 1);
   assert.throws(() => validateHarnesses([h, h]), /duplicate/);
   assert.throws(() => validateHarnesses([{ ...h, authorise: "pairing" }]), /authorise/);
   assert.throws(() => validateHarnesses([{ ...h, kind: "agentic" }]), /kind/);
   assert.throws(() => validateHarnesses([{ ...h, assets: {} }]), /exactly/);
+  assert.throws(() => validateHarnesses([{ ...h, instructions: [] }]), /at least one/);
+  assert.throws(() => validateHarnesses([{ ...h, instructions: [{ title: "t", detail: "use {{ownerToken}}" }] }]), /unknown placeholder/);
+  assert.throws(() => validateHarnesses([{ ...h, instructions: [{ title: "t", detail: "d", copy: { kind: "html", value: "x" } }] }]), /copy/);
   assert.throws(() => validateHarnesses([{ ...h, icon: "https://evil.example/x.svg" }]), /icon/);
   assert.throws(
     () =>
