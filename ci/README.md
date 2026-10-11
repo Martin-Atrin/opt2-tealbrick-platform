@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v1)
+# opt2 CI standard (template ci-v2)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -17,13 +17,17 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
 | image-publish | tag `v*` only: push `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>` | build/push fails, `ghcr_token` missing |
 | release-record | tag `v*` only: signed release record as GitHub release assets + release registry entry | signing key missing, digest conflict |
+| package-release | tag `<package>-v<semver>` only: `npm pack` of `packages/<package>` -> tarball + `.sha256` on the GitHub release | version mismatch, an in-repo dependency not released yet |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
 
 ## Package rules (enforced by setup)
-- Every `package.json` has `"private": true` and no `publishConfig` (no npm publishing in opt2). Cross-repo dependencies are git tags: `"github:Martin-Atrin/opt2-tealbrick-sdk#v0.1.0"`.
+- Every `package.json` (root and workspace packages) has `"private": true` and no `publishConfig` (no npm publishing in opt2).
+- Dependencies on `@opt2-tealbrick/*` are either `workspace:*` (package in the same repo) or a GitHub release tarball URL, which setup checks exists:
+  `"@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz"`. A registry version string fails.
+- v1 package names (`tealbrick`, `@tealbrick/*`) fail the build.
 - A committed lockfile. With pnpm: `"packageManager": "pnpm@<version>"` (CI uses corepack on Node 24).
-- Root scripts: `typecheck`, `lint`, `test`; plus `conformance` for miniapps and the bridge. Recommended: `tsc --noEmit`, `biome check .`, `node --test`.
+- Root scripts: `typecheck`, `lint`, `test`; plus `conformance` for miniapps and the bridge; plus `build` in multi-package repos (`pnpm-workspace.yaml`, packages under `packages/<name>/`, shipped compiled as `dist/`). Recommended: `tsc --noEmit`, `biome check .`, `node --test`.
 - TypeScript only (Node 24 type stripping: no enums, no parameter properties, `.ts` import extensions).
 
 ## Adopt in a repo
@@ -45,7 +49,13 @@ Schema: `ci/tealbrick-ci.schema.json`. Example for a miniapp:
 ```
 Image names are the repo name or `<repo>-<component>` (for example `opt2-tealbrick-bridge-server`).
 
-## Releases
+## Package releases (multi-package repos: specs, sdk, bridge, packages)
+Tag `<dir>-v<semver>` where `<dir>` is the folder name under `packages/` and `<semver>` equals that package.json `version`
+(e.g. `manifest-v0.1.0`). CI runs the full pipeline (incl. `build`), rewrites in-repo `workspace:` deps to their release URLs
+(they must be released first), runs `npm pack`, and attaches `<name>-<version>.tgz` + `.sha256` to the GitHub release.
+Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`).
+
+## App releases
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
 Releases are immutable: the same version with another image digest is rejected. See `registry/README.md`.
 

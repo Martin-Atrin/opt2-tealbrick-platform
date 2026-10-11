@@ -6,13 +6,14 @@
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
 //   release-record              (tag v*) signed release record -> GitHub release assets + registry
+//   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
 //   adopt <repoDir> --kind <k>  (local) install the standard into a repo
 //   stamp                       (platform maintainers) write the runner sha256 into the template
 //   keygen <outDir>             (platform maintainers) create an Ed25519 release key pair (private key never printed)
 
 import { execFileSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -140,17 +141,80 @@ function safeRel(p: string): boolean {
   return p.length > 0 && !p.startsWith("/") && !p.split("/").includes("..");
 }
 
-export function requiredScripts(cfg: CiConfig): string[] {
-  return [...REQUIRED_SCRIPTS, ...(cfg.conformance ? ["conformance"] : [])];
+export function requiredScripts(cfg: CiConfig, multiPackage = false): string[] {
+  return [...REQUIRED_SCRIPTS, ...(cfg.conformance ? ["conformance"] : []), ...(multiPackage ? ["build"] : [])];
 }
 
-export function checkPackageJson(pkg: Record<string, unknown>, cfg: CiConfig, where: string): string[] {
+export function checkPackageJson(pkg: Record<string, unknown>, cfg: CiConfig, where: string, multiPackage = false): string[] {
   const errors: string[] = [];
-  if (pkg.private !== true) errors.push(`${where}: "private": true is required (no npm publishing in opt2; use git dependencies)`);
+  if (pkg.private !== true) errors.push(`${where}: "private": true is required (no npm publishing in opt2; packages ship as GitHub release tarballs)`);
   if (pkg.publishConfig !== undefined) errors.push(`${where}: publishConfig is not allowed`);
   const scripts = (pkg.scripts ?? {}) as Record<string, unknown>;
-  for (const s of requiredScripts(cfg)) if (typeof scripts[s] !== "string") errors.push(`${where}: script "${s}" is required`);
+  for (const s of requiredScripts(cfg, multiPackage)) if (typeof scripts[s] !== "string") errors.push(`${where}: script "${s}" is required`);
   return errors;
+}
+
+export const RELEASE_URL_RE =
+  /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
+const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
+
+/** Dependency rules: no v1 names; @opt2-tealbrick/* only as workspace (same repo) or GitHub release tarball URL. Returns [errors, urls]. */
+export function checkDependencies(pkg: Record<string, unknown>, where: string, localNames: Set<string>): [string[], string[]] {
+  const errors: string[] = [];
+  const urls: string[] = [];
+  for (const field of DEP_FIELDS) {
+    const deps = (pkg[field] ?? {}) as Record<string, unknown>;
+    for (const [name, spec] of Object.entries(deps)) {
+      const v = String(spec);
+      if (name === "tealbrick" || name.startsWith("@tealbrick/")) errors.push(`${where}: ${field}.${name}: v1 package names are not allowed in opt2`);
+      if (!name.startsWith("@opt2-tealbrick/")) continue;
+      if (v.startsWith("workspace:")) {
+        if (!localNames.has(name)) errors.push(`${where}: ${field}.${name}: workspace: is only allowed for packages in this repo`);
+      } else if (RELEASE_URL_RE.test(v)) {
+        urls.push(v);
+      } else {
+        errors.push(
+          `${where}: ${field}.${name}: must be a GitHub release tarball URL (https://github.com/Martin-Atrin/opt2-tealbrick-<repo>/releases/download/<pkg>-v<ver>/<file>.tgz), got ${JSON.stringify(v)}`,
+        );
+      }
+    }
+  }
+  return [errors, urls];
+}
+
+/** Minimal pnpm-workspace.yaml reader: supports `- dir/*` and `- dir` entries only. */
+export function workspaceGlobs(yamlText: string): string[] {
+  const out: string[] = [];
+  let inPackages = false;
+  for (const line of yamlText.split("\n")) {
+    if (/^packages:\s*$/.test(line)) {
+      inPackages = true;
+      continue;
+    }
+    if (inPackages && /^\S/.test(line)) inPackages = false;
+    const m = inPackages ? /^\s+-\s+["']?([^"'#]+?)["']?\s*(#.*)?$/.exec(line) : null;
+    if (m) {
+      const g = m[1].trim();
+      if (!/^[A-Za-z0-9._/-]+(\/\*)?$/.test(g) || g.split("/").includes("..")) throw new Error(`unsupported workspace pattern ${g} (use dir/* or dir)`);
+      out.push(g);
+    }
+  }
+  return out;
+}
+
+export function parsePackageTag(tag: string): { dir: string; version: string } {
+  const m = /^([a-z0-9][a-z0-9-]*)-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(tag);
+  if (!m) throw new Error(`tag ${JSON.stringify(tag)} is not <package>-v<semver>`);
+  return { dir: m[1], version: m[2] };
+}
+
+/** npm pack file name for a package name + version. */
+export function tarballName(name: string, version: string): string {
+  return `${name.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
+}
+
+export function releaseUrl(repo: string, dir: string, name: string, version: string): string {
+  return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${tarballName(name, version)}`;
 }
 
 export function keyId(publicKeyPem: string): string {
@@ -292,6 +356,7 @@ async function cmdSetup(): Promise<void> {
   const cfg = loadConfig(root);
   log(`kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} images=${cfg.images.map((i) => i.name).join(",") || "-"}`);
   const errors: string[] = [];
+  const urls: string[] = [];
   for (const p of cfg.paths) {
     const pj = join(root, p, "package.json");
     if (!existsSync(pj)) {
@@ -299,7 +364,18 @@ async function cmdSetup(): Promise<void> {
       continue;
     }
     const pkg = readJson(pj);
-    errors.push(...checkPackageJson(pkg, cfg, `${p}/package.json`));
+    const ws = workspacePackages(join(root, p));
+    const localNames = new Set(ws.map((w) => w.name));
+    errors.push(...checkPackageJson(pkg, cfg, `${p}/package.json`, ws.length > 0));
+    for (const pkgJson of [{ rel: `${p}/package.json`, pkg }, ...ws.map((w) => ({ rel: `${p}/${w.rel}/package.json`, pkg: w.pkg }))]) {
+      const [depErrors, depUrls] = checkDependencies(pkgJson.pkg, pkgJson.rel, localNames);
+      errors.push(...depErrors);
+      urls.push(...depUrls);
+    }
+    for (const w of ws) {
+      if (w.pkg.private !== true) errors.push(`${p}/${w.rel}/package.json: "private": true is required`);
+      if (w.pkg.publishConfig !== undefined) errors.push(`${p}/${w.rel}/package.json: publishConfig is not allowed`);
+    }
     const pm = packageManager(join(root, p));
     if (!pm) errors.push(`${p}: a committed lockfile (pnpm-lock.yaml or package-lock.json) is required`);
     if (pm === "pnpm" && typeof pkg.packageManager !== "string")
@@ -308,6 +384,10 @@ async function cmdSetup(): Promise<void> {
   for (const im of cfg.images) {
     if (!existsSync(join(root, im.dockerfile))) errors.push(`image ${im.name}: ${im.dockerfile} not found`);
     if (im.manifest && !existsSync(join(root, im.manifest))) errors.push(`image ${im.name}: manifest ${im.manifest} not found`);
+  }
+  for (const u of new Set(urls)) {
+    const res = await fetch(u, { method: "HEAD", redirect: "follow" });
+    if (!res.ok) errors.push(`dependency tarball not found (HTTP ${res.status}): ${u}`);
   }
   if (errors.length) fail(`\n  - ${errors.join("\n  - ")}`);
   log("setup OK");
@@ -374,7 +454,7 @@ async function gh(
   method: string,
   path: string,
   body?: unknown,
-  extra: { host?: string; contentType?: string; raw?: string } = {},
+  extra: { host?: string; contentType?: string; raw?: string | Buffer } = {},
 ): Promise<{ status: number; json: any }> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) fail("GITHUB_TOKEN (Woodpecker secret ghcr_token) is missing");
@@ -386,7 +466,7 @@ async function gh(
       "x-github-api-version": "2022-11-28",
       ...(body !== undefined || extra.raw ? { "content-type": extra.contentType ?? "application/json" } : {}),
     },
-    body: extra.raw ?? (body !== undefined ? JSON.stringify(body) : undefined),
+    body: (extra.raw ?? (body !== undefined ? JSON.stringify(body) : undefined)) as BodyInit | undefined,
   });
   const text = await res.text();
   let json: any = null;
@@ -525,6 +605,101 @@ async function cmdReleaseRecord(): Promise<void> {
   await updateRegistry(records, keyPem);
 }
 
+interface WsPackage {
+  rel: string; // relative to the project path
+  dir: string; // basename = release tag prefix
+  name: string;
+  version: string;
+  pkg: Record<string, unknown>;
+}
+
+function workspacePackages(projectDir: string): WsPackage[] {
+  const wsFile = join(projectDir, "pnpm-workspace.yaml");
+  if (!existsSync(wsFile)) return [];
+  const out: WsPackage[] = [];
+  for (const g of workspaceGlobs(readFileSync(wsFile, "utf8"))) {
+    const rels = g.endsWith("/*")
+      ? (existsSync(join(projectDir, g.slice(0, -2))) ? readdirSync(join(projectDir, g.slice(0, -2)), { withFileTypes: true }) : [])
+          .filter((d) => d.isDirectory())
+          .map((d) => `${g.slice(0, -2)}/${d.name}`)
+      : [g];
+    for (const rel of rels) {
+      const pj = join(projectDir, rel, "package.json");
+      if (!existsSync(pj)) continue;
+      const pkg = readJson(pj);
+      out.push({ rel, dir: rel.split("/").pop() ?? rel, name: String(pkg.name), version: String(pkg.version), pkg });
+    }
+  }
+  return out;
+}
+
+async function uploadFile(repo: string, releaseId: number, name: string, data: Buffer, contentType: string): Promise<void> {
+  const list = await gh("GET", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?per_page=100`);
+  for (const a of (list.json ?? []) as Array<{ id: number; name: string }>) {
+    if (a.name === name) await gh("DELETE", `/repos/${OWNER}/${repo}/releases/assets/${a.id}`);
+  }
+  const up = await gh("POST", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`, undefined, {
+    host: "uploads.github.com",
+    contentType,
+    raw: data,
+  });
+  if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
+}
+
+async function cmdPackageRelease(): Promise<void> {
+  const root = repoRoot();
+  const cfg = loadConfig(root);
+  const repo = repoName(root);
+  const tag = process.env.CI_COMMIT_TAG;
+  if (!tag) fail("package-release runs on tag events only");
+  if (repo === PLATFORM_REPO && tag.startsWith("ci-v")) {
+    log(`SKIP: ${tag} is a CI template tag, not a package release`);
+    return;
+  }
+  let parsed: { dir: string; version: string };
+  try {
+    parsed = parsePackageTag(tag);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const all = cfg.paths.flatMap((p) => workspacePackages(join(root, p)).map((w) => ({ ...w, abs: join(root, p, w.rel) })));
+  const target = all.find((w) => w.dir === parsed.dir);
+  if (!target) fail(`no workspace package directory named ${parsed.dir} (tag ${tag})`);
+  if (target.version !== parsed.version) fail(`${target.rel}/package.json version ${target.version} != tag version ${parsed.version}`);
+  // Rewrite in-repo workspace deps to their released tarball URLs; the release must exist.
+  const pjPath = join(target.abs, "package.json");
+  const original = readFileSync(pjPath, "utf8");
+  const pkg = JSON.parse(original) as Record<string, Record<string, string> | unknown>;
+  for (const field of DEP_FIELDS) {
+    const deps = pkg[field] as Record<string, string> | undefined;
+    if (!deps) continue;
+    for (const [name, spec] of Object.entries(deps)) {
+      if (!spec.startsWith("workspace:")) continue;
+      const dep = all.find((w) => w.name === name);
+      if (!dep || !name.startsWith("@opt2-tealbrick/")) fail(`${field}.${name}: only @opt2-tealbrick/* workspace dependencies can be released`);
+      const url = releaseUrl(repo, dep.dir, dep.name, dep.version);
+      const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+      if (!res.ok) fail(`${name}@${dep.version} is not released yet (${url}); tag ${dep.dir}-v${dep.version} first`);
+      deps[name] = url;
+    }
+  }
+  const outDir = join(root, ".tb-ci/pack");
+  mkdirSync(outDir, { recursive: true });
+  try {
+    writeFileSync(pjPath, `${JSON.stringify(pkg, null, 2)}\n`);
+    sh("npm", ["pack", "--pack-destination", outDir], target.abs);
+  } finally {
+    writeFileSync(pjPath, original);
+  }
+  const file = tarballName(target.name, target.version);
+  const data = readFileSync(join(outDir, file));
+  const sha = createHash("sha256").update(data).digest("hex");
+  const releaseId = await ensureRelease(repo, tag, channelForVersion(target.version) !== "stable");
+  await uploadFile(repo, releaseId, file, data, "application/gzip");
+  await uploadFile(repo, releaseId, `${file}.sha256`, Buffer.from(`${sha}  ${file}\n`), "text/plain");
+  log(`released ${target.name}@${target.version}: ${releaseUrl(repo, target.dir, target.name, target.version)} (sha256 ${sha})`);
+}
+
 function cmdAdopt(args: string[]): void {
   const dir = args[0];
   const kindIdx = args.indexOf("--kind");
@@ -581,6 +756,8 @@ async function main(argv: string[]): Promise<void> {
       return cmdPlanImages();
     case "release-record":
       return cmdReleaseRecord();
+    case "package-release":
+      return cmdPackageRelease();
     case "adopt":
       return cmdAdopt(rest);
     case "stamp":
@@ -588,7 +765,7 @@ async function main(argv: string[]): Promise<void> {
     case "keygen":
       return cmdKeygen(rest[0]);
     default:
-      fail("usage: tb-ci setup|install|run <script>|plan-images|release-record|adopt|stamp|keygen");
+      fail("usage: tb-ci setup|install|run <script>|plan-images|release-record|package-release|adopt|stamp|keygen");
   }
 }
 

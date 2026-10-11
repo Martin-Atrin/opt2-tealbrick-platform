@@ -4,15 +4,20 @@ import { test } from "node:test";
 import {
   addToIndex,
   channelForVersion,
+  checkDependencies,
   checkPackageJson,
   keyId,
+  parsePackageTag,
   type ReleaseRecord,
+  releaseUrl,
   renderImagesScript,
   serializeIndex,
   signBytes,
+  tarballName,
   validateConfig,
   verifyBytes,
   versionFromTag,
+  workspaceGlobs,
 } from "./tb-ci.ts";
 
 const repo = "opt2-tealbrick-knowledge";
@@ -109,4 +114,37 @@ test("images script: no-push on check, guarded publish", () => {
   assert.match(s, /ghcr_token is missing/);
   assert.match(s, new RegExp(`ghcr.io/martin-atrin/${repo}:\\$version`));
   assert.ok(!s.includes('echo "$GHCR_TOKEN'), "token must never be echoed");
+});
+
+test("dependency rules: v1 names rejected, @opt2-tealbrick only via workspace or release URL", () => {
+  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz";
+  const [errs, urls] = checkDependencies(
+    {
+      dependencies: { "@opt2-tealbrick/manifest": url, "@opt2-tealbrick/spec": "0.1.0", tealbrick: "1.0.0", zod: "^4" },
+      devDependencies: { "@tealbrick/contract": "1", "@opt2-tealbrick/miniapp-sdk": "workspace:*", "@opt2-tealbrick/other": "workspace:*" },
+    },
+    "pkg",
+    new Set(["@opt2-tealbrick/miniapp-sdk"]),
+  );
+  assert.deepEqual(urls, [url]);
+  assert.equal(errs.length, 4, errs.join("\n"));
+  assert.ok(errs.some((e) => e.includes("@opt2-tealbrick/spec") && e.includes("release tarball URL")));
+  assert.ok(errs.some((e) => e.includes("dependencies.tealbrick")));
+  assert.ok(errs.some((e) => e.includes("@tealbrick/contract")));
+  assert.ok(errs.some((e) => e.includes("@opt2-tealbrick/other") && e.includes("workspace")));
+  assert.equal(checkDependencies({ dependencies: { "@opt2-tealbrick/x": "https://evil.example/x.tgz" } }, "p", new Set())[0].length, 1);
+});
+
+test("workspace globs and package tags", () => {
+  assert.deepEqual(workspaceGlobs("packages:\n  - 'packages/*'\n  - tools\nother: 1\n"), ["packages/*", "tools"]);
+  assert.throws(() => workspaceGlobs("packages:\n  - 'packages/**'\n"), /unsupported/);
+  assert.deepEqual(parsePackageTag("manifest-v0.1.0"), { dir: "manifest", version: "0.1.0" });
+  assert.deepEqual(parsePackageTag("create-tealbrick-miniapp-v1.2.3-rc.1"), { dir: "create-tealbrick-miniapp", version: "1.2.3-rc.1" });
+  assert.throws(() => parsePackageTag("v0.1.0"));
+  assert.equal(tarballName("@opt2-tealbrick/manifest", "0.1.0"), "opt2-tealbrick-manifest-0.1.0.tgz");
+  assert.equal(tarballName("create-tealbrick-miniapp", "0.1.0"), "create-tealbrick-miniapp-0.1.0.tgz");
+  assert.equal(
+    releaseUrl("opt2-tealbrick-sdk", "manifest", "@opt2-tealbrick/manifest", "0.1.0"),
+    "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz",
+  );
 });
