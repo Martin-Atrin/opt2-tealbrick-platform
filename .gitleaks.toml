@@ -1,0 +1,7 @@
+# The signed release index envelope is a PUBLIC signed document (a JWS over a digest), not a credential.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "public signed release index envelope"
+paths = ['''^registry/index\.jws$''']
