@@ -41,7 +41,7 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
 ```
 - `kind`: `app` | `bridge` | `desktop` (PORTAL-API `Release`). `channel`: `stable` (plain semver) | `dev` (any prerelease).
 - Exactly one of `image` (pinned by digest), `source` (C29 interim, dev only: `{repo, ref: <commit sha>, dockerfile}`), `artifact` (desktop: `{url, sha256}` of the notarized download, plus `minOs`, `notarized`).
-- A stable release always has `image`. Releases are immutable: `(product, version)` never changes content.
+- A stable release always has `image`. Releases are immutable: `(product, version, channel)` never changes content (a dev source build and the later stable image of the same version are two releases).
 - Offers: $99 per app per major, no bundles (C29). `stripePrice.test` is used in opt2 (Stripe TEST); `live` stays null until cutover. Core verifies each price against Stripe at sync (active, one-time, amount, currency, tax behaviour, livemode).
 
 ## Writers (only these)

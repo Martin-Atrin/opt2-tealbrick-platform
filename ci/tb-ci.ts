@@ -294,14 +294,15 @@ export function releaseUrl(repo: string, dir: string, name: string, version: str
   return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${tarballName(name, version)}`;
 }
 
-/** Merge new releases into the index. Releases are immutable: (product, version) never changes its image or artifact. */
+/** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
+ *  A dev source build (C29) and the later stable image of the same version are two releases. */
 export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string): ReleaseIndex {
   const releases = [...(prev?.releases ?? [])];
   for (const r of add) {
     if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
     if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
-    const old = releases.find((x) => x.product === r.product && x.version === r.version);
+    const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
     if (old) {
       if (old.image !== r.image || old.artifact?.sha256 !== r.artifact?.sha256 || old.manifestDigest !== r.manifestDigest || old.source?.ref !== r.source?.ref)
         throw new Error(`${r.product}@${r.version} is already released with other content (releases are immutable; ship a new version)`);
@@ -844,7 +845,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
   if (kind !== "app" && kind !== "bridge") fail("--kind app|bridge");
   if (!repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo)) fail("--repo opt2-tealbrick-<name> required");
   if (!ref || !/^[0-9a-f]{40}$/.test(ref)) fail("--ref <full commit sha> required");
-  if (!version || !version.includes("-")) fail("--version must be a prerelease semver (source builds are channel dev)");
+  if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) fail("--version <semver> required (source builds always go to channel dev)");
   if (kind === "app" && !manifestPath) fail(`--manifest <path to ${MANIFEST_FILE}> required for apps`);
   const raw = (path: string) => `https://raw.githubusercontent.com/${OWNER}/${repo}/${ref}/${path}`;
   const df = await fetch(raw(dockerfile));

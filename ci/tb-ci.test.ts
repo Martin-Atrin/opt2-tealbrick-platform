@@ -103,6 +103,8 @@ test("index merge: add, idempotent re-add, immutable content, desktop kind, offe
   assert.throws(() => mergeIndex(null, [rel({ image: null, source: src })], [], "t"), /stable release needs an image/);
   assert.equal(mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null, source: src })], [], "t").releases.length, 1);
   assert.throws(() => mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null })], [], "t"), /image or source/);
+  const devSrc = mergeIndex(null, [rel({ channel: "dev", image: null, source: src })], [], "t");
+  assert.equal(mergeIndex(devSrc, [rel({})], [], "t2").releases.length, 2, "dev source 0.1.0 and stable image 0.1.0 coexist");
 });
 
 test("offers validation", () => {
