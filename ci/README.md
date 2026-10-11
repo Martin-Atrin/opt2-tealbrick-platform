@@ -66,7 +66,7 @@ Releases are immutable: the same version with another image digest is rejected. 
 ## Clean-up and the shared host
 kaniko builds inside the step container: no host daemon images, no host socket, no privileged step.
 Woodpecker removes step containers and the workspace volume after each run. Pinned base images stay cached on the host.
-Never run a global `docker/podman system prune` on neuu (shared daemon).
+Never run a global `docker/podman system prune` on the CI host (shared daemon).
 
 ## Changing the standard (platform maintainers)
 1. Edit `ci/tb-ci.ts` and/or `ci/woodpecker/ci.yaml`. For a new version, bump `TB_CI_REF` in the template.
