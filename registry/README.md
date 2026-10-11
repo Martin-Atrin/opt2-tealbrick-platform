@@ -11,6 +11,8 @@ The release index tells Portal Core what it can deploy (apps, the bridge) and wh
 | Harness options (reviewed input, C40) | `registry/harnesses.json` | change by PR only; the next publish carries them |
 | Public signing key | `registry/keys.json` (JWKS, Ed25519) | raw on `main`; Core pins it in config (`RELEASE_INDEX_PUBLIC_JWKS`) |
 
+Caching: raw.githubusercontent.com serves `main` with up to ~5 min CDN lag, and release-asset downloads can also lag briefly after a publish. Core should poll the release-asset URLs and accept that a new release can take up to ~5 min to appear (the signature check makes a stale copy harmless, never wrong). Supersession: releases are never edited or withdrawn in place; Core deploys the newest version on the workspace's channel (a later version supersedes an earlier one by semver).
+
 ## Trust rule
 Core (and TBD) accept the index only if `index.jws` verifies with the pinned key and `claims.indexDigest == digest(index.json body)`.
 All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`, `digest`), never a local copy (CORE §3).
