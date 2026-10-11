@@ -72,6 +72,7 @@ export interface IndexRelease {
   image: string | null; // ghcr.io/martin-atrin/<name>@sha256:<hex>
   artifact: { url: string; sha256: string } | null; // desktop
   source: { repo: string; ref: string; dockerfile: string } | null; // C29 interim: dev-channel source build until ghcr images exist
+  runtime: BridgeRuntime | null; // kind bridge only (the bridge has no app manifest); apps take runtime from their manifest
   minOs: string | null; // desktop
   notarized: boolean | null; // desktop
   upgradeFrom: string;
@@ -79,6 +80,36 @@ export interface IndexRelease {
   commit: string | null;
   tag: string | null;
   publishedAt: string;
+}
+
+/** Deploy recipe facts for the bridge service (apps carry these in their manifest `runtime`). */
+export interface BridgeRuntime {
+  port: number; // public (MCP, launch, key page)
+  internalPort: number; // private network only (apps, companions)
+  healthPath: string; // liveness
+  readyPath: string; // ready after enrolment
+  volumes: { mountPath: string; backup: boolean }[]; // backup = Railway volume backups on (C28, S7)
+  env: { name: string; source: "portal" | "provider-secret" | "public-url" | "fixed"; value?: string }[];
+}
+
+export function validateBridgeRuntime(raw: unknown): BridgeRuntime {
+  const r = raw as Record<string, unknown>;
+  const port = (v: unknown) => Number.isInteger(v) && (v as number) > 0 && (v as number) < 65536;
+  const path = (v: unknown) => typeof v === "string" && v.startsWith("/");
+  if (!r || !port(r.port) || !port(r.internalPort) || r.port === r.internalPort) throw new Error("runtime: port and internalPort must be distinct ports");
+  if (!path(r.healthPath) || !path(r.readyPath)) throw new Error("runtime: healthPath and readyPath must be absolute paths");
+  if (
+    !Array.isArray(r.volumes) ||
+    !r.volumes.every((v) => path((v as Record<string, unknown>).mountPath) && typeof (v as Record<string, unknown>).backup === "boolean")
+  )
+    throw new Error("runtime: volumes [{mountPath, backup}]");
+  if (!Array.isArray(r.env)) throw new Error("runtime: env list required");
+  for (const e of r.env as Record<string, unknown>[]) {
+    if (typeof e.name !== "string" || !/^[A-Z][A-Z0-9_]{1,63}$/.test(e.name)) throw new Error(`runtime: bad env name ${String(e.name)}`);
+    if (!["portal", "provider-secret", "public-url", "fixed"].includes(e.source as string)) throw new Error(`runtime: env ${e.name} source`);
+    if (e.source === "fixed" ? typeof e.value !== "string" : e.value !== undefined) throw new Error(`runtime: env ${e.name}: value only for source fixed`);
+  }
+  return r as unknown as BridgeRuntime;
 }
 
 export interface Offer {
@@ -297,11 +328,13 @@ export function releaseUrl(repo: string, dir: string, name: string, version: str
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
  *  A dev source build (C29) and the later stable image of the same version are two releases. */
 export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string): ReleaseIndex {
-  const releases = [...(prev?.releases ?? [])];
+  const releases = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null }));
   for (const r of add) {
     if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
     if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
+    if ((r.kind === "bridge") !== (r.runtime !== null && r.runtime !== undefined))
+      throw new Error(`${r.product}@${r.version}: runtime is required for kind bridge and only allowed there`);
     const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
     if (old) {
       if (old.image !== r.image || old.artifact?.sha256 !== r.artifact?.sha256 || old.manifestDigest !== r.manifestDigest || old.source?.ref !== r.source?.ref)
@@ -752,6 +785,12 @@ async function cmdReleaseRecord(): Promise<void> {
       skillsDigest = m.digest(archive);
       await uploadAsset(repo, releaseId, `skills-${im.product}.json`, `${JSON.stringify(archive)}\n`);
     }
+    let runtime: BridgeRuntime | null = null;
+    if (im.kind === "bridge") {
+      const rf = join(root, dirname(im.dockerfile), "bridge-runtime.json");
+      if (!existsSync(rf)) fail(`bridge image needs ${dirname(im.dockerfile)}/bridge-runtime.json`);
+      runtime = validateBridgeRuntime(JSON.parse(readFileSync(rf, "utf8")));
+    }
     add.push({
       id: newId("rel"),
       product: im.product,
@@ -764,6 +803,7 @@ async function cmdReleaseRecord(): Promise<void> {
       image: `${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`,
       artifact: null,
       source: null,
+      runtime,
       minOs: null,
       notarized: null,
       upgradeFrom: im.upgradeFrom,
@@ -816,6 +856,7 @@ async function cmdRegistryAddDesktop(args: string[]): Promise<void> {
       image: null,
       artifact: { url, sha256: `sha256:${sha256}` },
       source: null,
+      runtime: null,
       minOs,
       notarized,
       upgradeFrom,
@@ -841,7 +882,15 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
   const version = argValue(args, "--version");
   const manifestPath = argValue(args, "--manifest");
   const upgradeFrom = argValue(args, "--upgrade-from") ?? "*";
+  const runtimeFile = argValue(args, "--runtime");
   if (!product || !/^[a-z0-9][a-z0-9-]*$/.test(product)) fail("--product <id> required");
+  if ((kind === "bridge") !== Boolean(runtimeFile)) fail("--runtime <json file> is required for kind bridge and only allowed there");
+  let runtime: BridgeRuntime | null = null;
+  try {
+    runtime = runtimeFile ? validateBridgeRuntime(JSON.parse(readFileSync(runtimeFile, "utf8"))) : null;
+  } catch (e) {
+    fail((e as Error).message);
+  }
   if (kind !== "app" && kind !== "bridge") fail("--kind app|bridge");
   if (!repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo)) fail("--repo opt2-tealbrick-<name> required");
   if (!ref || !/^[0-9a-f]{40}$/.test(ref)) fail("--ref <full commit sha> required");
@@ -886,6 +935,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
       image: null,
       artifact: null,
       source: { repo: `${OWNER}/${repo}`, ref, dockerfile },
+      runtime,
       minOs: null,
       notarized: null,
       upgradeFrom,

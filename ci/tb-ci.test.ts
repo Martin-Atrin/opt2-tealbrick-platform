@@ -13,6 +13,7 @@ import {
   serializeIndex,
   skillsArchive,
   tarballName,
+  validateBridgeRuntime,
   validateConfig,
   validateOffers,
   versionFromTag,
@@ -71,6 +72,7 @@ const rel = (over: Partial<IndexRelease>): IndexRelease => ({
   image: `ghcr.io/martin-atrin/${repo}@sha256:${"a".repeat(64)}`,
   artifact: null,
   source: null,
+  runtime: null,
   minOs: null,
   notarized: null,
   upgradeFrom: "*",
@@ -88,13 +90,30 @@ test("ids are <prefix>_<ULID>", () => {
   assert.notEqual(newId("rel"), newId("rel"));
 });
 
+const brt = {
+  port: 8080,
+  internalPort: 8788,
+  healthPath: "/healthz",
+  readyPath: "/readyz",
+  volumes: [{ mountPath: "/data", backup: true }],
+  env: [{ name: "TB_KEK", source: "provider-secret" as const }],
+};
+
+test("bridge runtime validation", () => {
+  assert.deepEqual(validateBridgeRuntime(brt), brt);
+  assert.throws(() => validateBridgeRuntime({ ...brt, internalPort: 8080 }), /distinct/);
+  assert.throws(() => validateBridgeRuntime({ ...brt, env: [{ name: "X1", source: "fixed" }] }), /value only/);
+  assert.throws(() => mergeIndex(null, [rel({ product: "bridge", kind: "bridge", manifestDigest: null })], [], "t"), /runtime is required/);
+  assert.throws(() => mergeIndex(null, [rel({ runtime: brt })], [], "t"), /only allowed/);
+});
+
 test("index merge: add, idempotent re-add, immutable content, desktop kind, offers carried", () => {
   const i1 = mergeIndex(null, [rel({})], [], "t1");
   assert.equal(i1.schema, "opt2.release-index/v2");
   assert.equal(mergeIndex(i1, [rel({ id: "rel_other" })], [], "t2").releases.length, 1);
   assert.throws(() => mergeIndex(i1, [rel({ image: `ghcr.io/martin-atrin/${repo}@sha256:${"b".repeat(64)}` })], [], "t"), /immutable/);
   const desk = rel({ product: "tbd", kind: "desktop", image: null, manifestDigest: null, artifact: { url: "https://x", sha256: `sha256:${"d".repeat(64)}` } });
-  const i2 = mergeIndex(i1, [desk, rel({ product: "bridge", kind: "bridge", manifestDigest: null })], [], "t3");
+  const i2 = mergeIndex(i1, [desk, rel({ product: "bridge", kind: "bridge", manifestDigest: null, runtime: brt })], [], "t3");
   assert.deepEqual(
     i2.releases.map((r) => r.product),
     ["bridge", "knowledge", "tbd"],
