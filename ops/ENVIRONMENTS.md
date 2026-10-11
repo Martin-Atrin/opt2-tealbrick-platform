@@ -15,13 +15,12 @@ Rules: secrets are copied with `railway variable set <KEY> --stdin` (never on th
 ## Railway project "opt2-test-customer"
 The test customer's own Railway project for the test workspace (Portal deploys bridge + apps INTO it through the Railway link). Empty until Portal Core's deploy path runs. Nothing is created by hand there except for diagnosis.
 
-## Deploying a service (P1)
-From the repo working tree:
-```sh
-railway link --project opt2 --environment production --service <service>
-railway up --detach            # one-off deploy from the working tree
-```
-Preferred steady state: connect the service to its GitHub repo (`main`) in the Railway UI or `railway add --repo`, so every merge to main deploys. Images for customer workspaces are never built by Railway: they come from the release registry (`registry/README.md`).
+## Deploying a service (C32)
+`node ops/railway-deploy.ts --service <name> --repo opt2-tealbrick-<x> --sha <pushed sha> [--dockerfile <path>]` builds the service from its public GitHub repo at exactly that commit. No Railway GitHub app. `railway up` from a clean, pushed tree is the fallback only. Images for customer workspaces are never built this way: they come from the release index (`registry/README.md`).
+
+| Service | Source (current) |
+|---|---|
+| db-backup | Martin-Atrin/opt2-tealbrick-platform, `ops/db-backup/Dockerfile`, cron `17 19 * * *` |
 
 ## Off limits
 v1 Railway project `tealbrick-portal` ("Tealbrick Portal"), its production environment, portal.tealbrick.com and tealbrick.com. Its `staging` environment (old dev, serves dev.tealbrick.com) is read only until the Coordinator says to scrap it.
