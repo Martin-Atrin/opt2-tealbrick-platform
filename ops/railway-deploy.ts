@@ -1,0 +1,72 @@
+// Deploy an opt2 service in Railway project "opt2" from its PUBLIC GitHub repo at a pushed commit (C32).
+//   node ops/railway-deploy.ts --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>]
+// - refuses a SHA that is not on GitHub (must be pushed); records the SHA in the deployment.
+// - uses the Railway CLI login of the operator (~/.railway/config.json); prints no variable values.
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const PROJECT = "15297ce5-0283-4901-a408-9c802e6ac53a"; // Railway project "opt2"
+const ENVIRONMENT = "2a09b7be-6d8e-4981-a2b1-20bc7922fca5"; // production
+const OWNER = "Martin-Atrin";
+
+function arg(name: string): string | undefined {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : undefined;
+}
+const service = arg("--service");
+const repo = arg("--repo");
+const sha = arg("--sha");
+const dockerfile = arg("--dockerfile");
+const root = arg("--root");
+if (!service || !repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo) || !sha || !/^[0-9a-f]{40}$/.test(sha))
+  throw new Error("usage: --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>]");
+
+const cfg = JSON.parse(readFileSync(join(homedir(), ".railway/config.json"), "utf8")) as { user?: { token?: string } };
+const token = cfg.user?.token;
+if (!token) throw new Error("not logged in to the Railway CLI");
+
+async function gql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const res = await fetch("https://backboard.railway.com/graphql/v2", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "user-agent": "opt2-platform-deploy" },
+    body: JSON.stringify({ query, variables }),
+  });
+  const body = (await res.json()) as { data?: T; errors?: { message: string }[] };
+  if (!res.ok || body.errors?.length) throw new Error(`Railway API: ${body.errors?.map((e) => e.message).join("; ") ?? res.status}`);
+  return body.data as T;
+}
+
+const commit = await fetch(`https://api.github.com/repos/${OWNER}/${repo}/commits/${sha}`, { headers: { accept: "application/vnd.github+json" } });
+if (!commit.ok) throw new Error(`${repo}@${sha} is not on GitHub (HTTP ${commit.status}); push it first`);
+if (dockerfile) {
+  const df = await fetch(`https://raw.githubusercontent.com/${OWNER}/${repo}/${sha}/${dockerfile}`);
+  if (!df.ok) throw new Error(`${dockerfile} not found at ${repo}@${sha}`);
+}
+
+const proj = await gql<{ project: { services: { edges: { node: { id: string; name: string } }[] } } }>(
+  "query($id:String!){ project(id:$id){ services{ edges{ node{ id name } } } } }",
+  { id: PROJECT },
+);
+const svc = proj.project.services.edges.map((e) => e.node).find((n) => n.name === service);
+if (!svc) throw new Error(`service ${service} not in project opt2 (ask Platform to create it)`);
+
+if (dockerfile) {
+  await gql("mutation($i:VariableUpsertInput!){ variableUpsert(input:$i) }", {
+    i: { projectId: PROJECT, environmentId: ENVIRONMENT, serviceId: svc.id, name: "RAILWAY_DOCKERFILE_PATH", value: dockerfile, skipDeploys: true },
+  });
+}
+await gql("mutation($s:String!,$e:String!,$i:ServiceInstanceUpdateInput!){ serviceInstanceUpdate(serviceId:$s, environmentId:$e, input:$i) }", {
+  s: svc.id,
+  e: ENVIRONMENT,
+  i: { source: { repo: `${OWNER}/${repo}` }, ...(root ? { rootDirectory: root } : {}) },
+});
+const dep = await gql<{ serviceInstanceDeployV2: string }>(
+  "mutation($s:String!,$e:String!,$c:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e, commitSha:$c) }",
+  {
+    s: svc.id,
+    e: ENVIRONMENT,
+    c: sha,
+  },
+);
+console.log(`deploy ${service} <- ${OWNER}/${repo}@${sha}${dockerfile ? ` (${dockerfile})` : ""}: deployment ${dep.serviceInstanceDeployV2}`);
