@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/main/ci/tealbrick-ci.schema.json",
+  "title": "tealbrick-ci.json (opt2 CI standard, repo settings)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "kind": { "enum": ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"] },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "default": ["."],
+      "description": "Node project roots (each needs package.json + lockfile)."
+    },
+    "conformance": { "type": "boolean", "description": "Default: true for miniapp and bridge, else false." },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "product", "productKind"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "description": "Repo name or <repo>-<component>; published as ghcr.io/martin-atrin/<name>."
+          },
+          "context": { "type": "string", "default": "." },
+          "dockerfile": { "type": "string", "default": "Dockerfile" },
+          "product": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Release registry product id (manifest id for miniapps)." },
+          "productKind": { "enum": ["miniapp", "bridge", "portal", "service"] },
+          "manifest": { "type": "string", "description": "App manifest path (required for miniapp)." }
+        }
+      }
+    }
+  }
+}

@@ -23,3 +23,9 @@ Woodpecker CI (shared opt2 pipeline template from `opt2-tealbrick-platform`).
 ## Language
 
 New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
+
+## Layout
+
+- `ci/` — the ONE opt2 Woodpecker pipeline (`ci/woodpecker/ci.yaml`), its runner `ci/tb-ci.ts`, repo settings schema. Start at `ci/README.md`.
+- `registry/` — signed release index that Portal Core reads (`registry/README.md`).
+- `ops/` — environments (Railway), backups, monitoring, runbooks.
