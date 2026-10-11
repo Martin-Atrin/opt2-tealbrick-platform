@@ -1,7 +1,76 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-11T11:30:27.323Z",
+  "generatedAt": "2026-10-11T11:33:13.804Z",
   "releases": [
+    {
+      "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
+      "product": "bridge",
+      "kind": "bridge",
+      "version": "0.1.0",
+      "channel": "dev",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": null,
+      "source": {
+        "repo": "Martin-Atrin/opt2-tealbrick-bridge",
+        "ref": "da331e36ad71e93571da3b4dcc507c569cc0d07a",
+        "dockerfile": "packages/bridge-server/Dockerfile"
+      },
+      "runtime": {
+        "port": 8080,
+        "internalPort": 8788,
+        "healthPath": "/healthz",
+        "readyPath": "/readyz",
+        "volumes": [
+          {
+            "mountPath": "/data",
+            "backup": true
+          }
+        ],
+        "env": [
+          {
+            "name": "PORT",
+            "source": "fixed",
+            "value": "8080"
+          },
+          {
+            "name": "TB_INTERNAL_PORT",
+            "source": "fixed",
+            "value": "8788"
+          },
+          {
+            "name": "TB_DATA_DIR",
+            "source": "fixed",
+            "value": "/data"
+          },
+          {
+            "name": "TB_KEK",
+            "source": "provider-secret"
+          },
+          {
+            "name": "TB_PORTAL_URL",
+            "source": "portal"
+          },
+          {
+            "name": "TB_ENROL_CODE",
+            "source": "portal"
+          },
+          {
+            "name": "TB_PUBLIC_URL",
+            "source": "public-url"
+          }
+        ]
+      },
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-bridge",
+      "commit": "da331e36ad71e93571da3b4dcc507c569cc0d07a",
+      "tag": null,
+      "publishedAt": "2026-10-11T11:33:12.716Z"
+    },
     {
       "id": "rel_01M4NBMYAD3NH60WW7GCRPSJMG",
       "product": "connect",
@@ -24,7 +93,8 @@
       "repo": "Martin-Atrin/opt2-tealbrick-connect",
       "commit": "1cec77a38c350bdc0948bdc7e77410d321d83642",
       "tag": null,
-      "publishedAt": "2026-10-11T11:30:26.254Z"
+      "publishedAt": "2026-10-11T11:30:26.254Z",
+      "runtime": null
     },
     {
       "id": "rel_01M4NBEHRQ84GFT0Y316P40NJ6",
@@ -48,7 +118,8 @@
       "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
       "commit": "666daeebb153af0d5879bbc7a6d5f06e5be4eb20",
       "tag": null,
-      "publishedAt": "2026-10-11T11:26:56.791Z"
+      "publishedAt": "2026-10-11T11:26:56.791Z",
+      "runtime": null
     }
   ],
   "offers": [
