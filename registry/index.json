@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-11T11:39:09.751Z",
+  "generatedAt": "2026-10-11T11:40:16.348Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -159,63 +159,43 @@
   "harnesses": [
     {
       "id": "tbd-default",
-      "label": "TBD default agent — runs on this Mac",
       "kind": "desktop",
+      "label": "TBD default agent — runs on this Mac",
+      "icon": null,
       "authorise": "device_approval",
-      "noAgentPath": true,
-      "assets": {
-        "icon": null,
-        "install": null,
-        "instructions": null
-      }
+      "noAgentPath": true
     },
     {
       "id": "claude-desktop",
-      "label": "Claude Desktop",
       "kind": "desktop",
-      "authorise": "pairing",
-      "noAgentPath": false,
-      "assets": {
-        "icon": null,
-        "install": null,
-        "instructions": null
-      }
+      "label": "Claude Desktop",
+      "icon": null,
+      "authorise": "instruction_set",
+      "noAgentPath": false
     },
     {
       "id": "codex-desktop",
-      "label": "Codex desktop",
       "kind": "desktop",
-      "authorise": "pairing",
-      "noAgentPath": false,
-      "assets": {
-        "icon": null,
-        "install": null,
-        "instructions": null
-      }
+      "label": "Codex desktop",
+      "icon": null,
+      "authorise": "instruction_set",
+      "noAgentPath": false
     },
     {
       "id": "eve",
+      "kind": "agentic_system",
       "label": "Eve",
-      "kind": "agentic",
-      "authorise": "key",
-      "noAgentPath": false,
-      "assets": {
-        "icon": null,
-        "install": null,
-        "instructions": null
-      }
+      "icon": null,
+      "authorise": "device_approval",
+      "noAgentPath": false
     },
     {
       "id": "generic-mcp",
+      "kind": "other",
       "label": "Any MCP harness",
-      "kind": "generic",
-      "authorise": "pairing",
-      "noAgentPath": false,
-      "assets": {
-        "icon": null,
-        "install": null,
-        "instructions": null
-      }
+      "icon": null,
+      "authorise": "url",
+      "noAgentPath": false
     }
   ]
 }
