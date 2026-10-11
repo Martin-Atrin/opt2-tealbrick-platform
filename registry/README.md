@@ -1,42 +1,56 @@
 # opt2 release registry
 
-A signed index of app releases that Portal Core reads to know what it can deploy.
+The release index tells Portal Core what it can deploy (apps, the bridge) and what it sells (offers), and it is TBD's update feed (desktop entries, C24).
 
-- Index: `registry/index.json` on `main`. Raw URL: `https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/main/registry/index.json`
-- Signature: `registry/index.json.sig` = base64 Ed25519 signature over the exact bytes of `index.json`.
-- Public key: `registry/release-key.pub.pem` (kid = first 16 hex chars of sha256 over the SPKI DER: `ccd73c250bdf847b`). Portal Core pins this key in its config; it never trusts the index without verifying the signature (`registry/verify.ts` is the reference).
-- Writer: only the `release-record` CI step (tag `v*`), which signs with the Woodpecker secret `release_signing_key`. Each record is also attached to the GitHub release of the tag as `release-record-<product>.json` + `.sig`.
+## Files and URLs
+| What | Repo path | Public URL |
+|---|---|---|
+| Index body | `registry/index.json` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.json` (also raw on `main`) |
+| Signed envelope | `registry/index.jws` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.jws` |
+| Offers (reviewed input) | `registry/offers.json` | change by PR only; the next publish carries them |
+| Public signing key | `registry/keys.json` (JWKS, Ed25519) | raw on `main`; Core pins it in config (`RELEASE_INDEX_PUBLIC_JWKS`) |
 
-## Format (`opt2.release-index/v1`)
+## Trust rule
+Core (and TBD) accept the index only if `index.jws` verifies with the pinned key and `claims.indexDigest == digest(index.json body)`.
+All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`, `digest`), never a local copy (CORE §3).
+- JWS: compact, `alg EdDSA`, `kid` = RFC 7638 thumbprint, `typ tb-release-index+jws`.
+- Claims: `{iss: "tb:releases", aud: "tb:portal", iat, exp (iat + 180 d), schema: "opt2.release-index/v2", indexDigest, releases, offers}` (counts).
+- The JWS signs a digest, not the body, so the envelope stays far below `MAX_JWS_BYTES` however many releases exist.
+- The envelope expires after 180 days; `registry-sign` re-signs (monthly). An expired envelope = no new releases accepted; existing Core rows stay.
+
+**Interim (2026-10-11):** the index is published UNSIGNED (no `index.jws`) because the frozen spec has no `typ` for it yet (REQUESTS "platform: release index typ"). Core may read the body now; it must not treat it as trusted for stable releases until `index.jws` exists.
+
+## Body (`opt2.release-index/v2`)
 ```json
 {
-  "schema": "opt2.release-index/v1",
-  "kid": "ccd73c250bdf847b",
+  "schema": "opt2.release-index/v2",
   "generatedAt": "2026-10-11T12:00:00.000Z",
   "releases": [{
-    "schema": "opt2.release-record/v1",
-    "releaseId": "knowledge@0.1.0",
-    "product": "knowledge",
-    "productKind": "miniapp",
-    "version": "0.1.0",
-    "channel": "stable",
-    "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
-    "commit": "<git sha>",
-    "tag": "v0.1.0",
-    "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge@sha256:<hex>",
-    "imageDigest": "sha256:<hex>",
-    "manifestDigest": "sha256:<hex>",
-    "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/v0.1.0/tealbrick.manifest.json",
-    "publishedAt": "2026-10-11T12:00:00.000Z"
+    "id": "rel_01M4...", "product": "knowledge", "kind": "app", "version": "0.1.0", "channel": "stable",
+    "manifestDigest": "sha256:<hex of JCS(manifest)>", "manifestUrl": "https://github.com/.../releases/download/v0.1.0/tealbrick.manifest.json",
+    "skillsDigest": "sha256:<digest of the skills archive>",
+    "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge@sha256:<hex>", "artifact": null, "source": null,
+    "minOs": null, "notarized": null, "upgradeFrom": "*",
+    "repo": "Martin-Atrin/opt2-tealbrick-knowledge", "commit": "<sha>", "tag": "v0.1.0", "publishedAt": "..."
+  }],
+  "offers": [{
+    "id": "off_01M4...", "kind": "single", "name": "Knowledge", "products": ["knowledge"], "major": 0,
+    "amount": 9900, "currency": "usd", "taxNote": "...", "stripePrice": { "test": "price_...", "live": null }
   }]
 }
 ```
-- `productKind`: `miniapp` (deployable app), `bridge` (the workspace bridge, same index), `portal`, `service`.
-- `channel`: `stable` | `beta` | `dev` (from the version, see `ci/README.md`).
-- `manifestDigest`: today sha256 of the manifest file bytes. When Lead · Specs freezes the canonical manifest digest (`manifestDigest()` in the SDK), the CI runner switches to it in a new template version; Core must compare with the SDK function.
-- Releases are immutable: a `releaseId` never changes its image digest. Withdrawal is a new release, not an edit.
-- Deploys use `image` (pinned by digest), never a tag.
+- `kind`: `app` | `bridge` | `desktop` (PORTAL-API `Release`). `channel`: `stable` (plain semver) | `dev` (any prerelease).
+- Exactly one of `image` (pinned by digest), `source` (C29 interim, dev only: `{repo, ref: <commit sha>, dockerfile}`), `artifact` (desktop: `{url, sha256}` of the notarized download, plus `minOs`, `notarized`).
+- A stable release always has `image`. Releases are immutable: `(product, version)` never changes content.
+- Offers: $99 per app per major, no bundles (C29). `stripePrice.test` is used in opt2 (Stripe TEST); `live` stays null until cutover. Core verifies each price against Stripe at sync (active, one-time, amount, currency, tax behaviour, livemode).
+
+## Writers (only these)
+- CI `release-record` step on `v*` tags (app/bridge images; needs `ghcr_token`, `release_signing_key`).
+- `node ci/tb-ci.ts registry-add-source --product <id> --kind app|bridge --repo opt2-tealbrick-<x> --ref <sha> --dockerfile <path> --version <x.y.z-dev.N> [--manifest tealbrick.manifest.json]` (C29 interim).
+- `node ci/tb-ci.ts registry-add-desktop --product tbd --version <semver> --url <GitHub release asset> --sha256 <hex> [--min-os 14.0]` (TBD release Mac; downloads and checks the sha256 first).
+- `node ci/tb-ci.ts registry-sign` (offers changed / re-sign).
+Local runs need `GITHUB_TOKEN` in the environment (e.g. `GITHUB_TOKEN="$(gh auth token)"`, never echoed), `RELEASE_SIGNING_KEY_FILE`, and the manifest package (`TB_MANIFEST_PKG` release URL, or `TB_MANIFEST_MODULE` path to a built package).
 
 ## Key handling
-The private key lives only in Woodpecker (secret `release_signing_key`) and in the owner's local key store; it is never committed or printed.
-Rotation: generate a new pair (`node ci/tb-ci.ts keygen <dir>`), re-sign the current index with the new key, update `release-key.pub.pem` and Core's pinned key in the same change window.
+Private key: Woodpecker secret `release_signing_key` and the owner's local key store (`~/.config/opt2-tealbrick/release-key.pem`, 0600). Never committed or printed.
+Rotation: add the new public key to `keys.json`, re-sign with the new key, then remove the old key in a later change (Core accepts any key in its pinned JWKS).

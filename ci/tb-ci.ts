@@ -1,41 +1,55 @@
-// opt2 CI runner (one file, no dependencies, Node 24+ runs it directly).
+// opt2 CI runner (one file, no dependencies of its own, Node 24+ runs it directly).
 // Fetched by every repo's .woodpecker/ci.yaml at a pinned tag + sha256.
 // Commands:
 //   setup                       template drift + config + package rules
 //   install                     install dependencies per project path (frozen lockfile)
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
-//   release-record              (tag v*) signed release record -> GitHub release assets + registry
+//   release-record              (tag v*) release entries (app|bridge) -> GitHub release assets + signed release index
 //   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
+//   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index
+//   registry-sign               re-sign the index (offers changed, or before the envelope expires)
+//   registry-add-source ...     (C29 interim) dev entry built from source at a pushed commit
 //   adopt <repoDir> --kind <k>  (local) install the standard into a repo
 //   stamp                       (platform maintainers) write the runner sha256 into the template
-//   keygen <outDir>             (platform maintainers) create an Ed25519 release key pair (private key never printed)
+// Crypto and canonical JSON come ONLY from @opt2-tealbrick/manifest (CORE §3: one owner of primitives),
+// loaded at run time from its GitHub release tarball (TB_MANIFEST_PKG) for the registry commands.
 
 import { execFileSync } from "node:child_process";
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const OWNER = "Martin-Atrin";
 export const REGISTRY_HOST = "ghcr.io";
 export const IMAGE_NAMESPACE = "ghcr.io/martin-atrin";
 export const PLATFORM_REPO = "opt2-tealbrick-platform";
 export const INDEX_PATH = "registry/index.json";
-export const INDEX_SIG_PATH = "registry/index.json.sig";
-export const INDEX_SCHEMA = "opt2.release-index/v1";
-export const RECORD_SCHEMA = "opt2.release-record/v1";
+export const ENVELOPE_PATH = "registry/index.jws";
+export const OFFERS_PATH = "registry/offers.json";
+export const REGISTRY_RELEASE_TAG = "registry";
+export const INDEX_SCHEMA = "opt2.release-index/v2";
+export const INDEX_TYP = "tb-release-index+jws";
+export const INDEX_ISS = "tb:releases";
+export const INDEX_AUD = "tb:portal";
+export const ENVELOPE_LIFETIME_S = 180 * 86400;
+export const MANIFEST_FILE = "tealbrick.manifest.json";
 
 export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"] as const;
 export type Kind = (typeof KINDS)[number];
+
+/** Image kinds: `app` and `bridge` become release-index entries; `portal` images are published only (ours, not deployed into workspaces). */
+export type ImageKind = "app" | "bridge" | "portal";
 
 export interface ImageSpec {
   name: string; // ghcr image name, must start with the repo name
   context: string; // build context, relative to repo root
   dockerfile: string; // relative to repo root
-  product: string; // registry product id (manifest id for miniapps)
-  productKind: "miniapp" | "bridge" | "portal" | "service";
-  manifest?: string; // path to the app manifest (miniapps), relative to repo root
+  product: string; // release-index product id (manifest id for apps)
+  kind: ImageKind;
+  manifest?: string; // app manifest path (required for kind app), relative to repo root
+  upgradeFrom: string; // semver range of versions that may update to this release
 }
 
 export interface CiConfig {
@@ -45,30 +59,67 @@ export interface CiConfig {
   images: ImageSpec[];
 }
 
-export type Channel = "stable" | "beta" | "dev";
-
-export interface ReleaseRecord {
-  schema: typeof RECORD_SCHEMA;
-  releaseId: string; // <product>@<version>
+/** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
+export type Channel = "stable" | "dev";
+export interface IndexRelease {
+  id: string; // rel_<ULID>
   product: string;
-  productKind: ImageSpec["productKind"];
+  kind: "app" | "bridge" | "desktop";
   version: string;
   channel: Channel;
-  repo: string; // owner/name
-  commit: string;
-  tag: string;
-  image: string; // ghcr.io/martin-atrin/<name>@sha256:...
-  imageDigest: string;
-  manifestDigest: string | null; // sha256:<hex> of the manifest file bytes (SDK canonical digest replaces this when frozen)
+  manifestDigest: string | null;
   manifestUrl: string | null;
+  skillsDigest: string | null;
+  image: string | null; // ghcr.io/martin-atrin/<name>@sha256:<hex>
+  artifact: { url: string; sha256: string } | null; // desktop
+  source: { repo: string; ref: string; dockerfile: string } | null; // C29 interim: dev-channel source build until ghcr images exist
+  minOs: string | null; // desktop
+  notarized: boolean | null; // desktop
+  upgradeFrom: string;
+  repo: string;
+  commit: string | null;
+  tag: string | null;
   publishedAt: string;
+}
+
+export interface Offer {
+  id: string; // off_<ULID>
+  kind: "single" | "bundle";
+  name: string;
+  products: string[];
+  major: number;
+  amount: number; // minor units
+  currency: string;
+  taxNote: string;
+  stripePrice: { test: string | null; live: string | null };
 }
 
 export interface ReleaseIndex {
   schema: typeof INDEX_SCHEMA;
-  kid: string;
   generatedAt: string;
-  releases: ReleaseRecord[];
+  releases: IndexRelease[];
+  offers: Offer[];
+}
+
+/** Claims of the signed envelope (the JWS stays far below MAX_JWS_BYTES; the body is index.json). */
+export interface IndexEnvelopeClaims {
+  iss: typeof INDEX_ISS;
+  aud: typeof INDEX_AUD;
+  iat: number;
+  exp: number;
+  schema: typeof INDEX_SCHEMA;
+  indexDigest: string; // manifest-package digest(index body)
+  releases: number;
+  offers: number;
+}
+
+/** The subset of @opt2-tealbrick/manifest the registry uses (SDK-API §2). */
+export interface ManifestPkg {
+  digest(value: unknown): string;
+  manifestDigest(manifest: unknown): string;
+  validateManifest(json: unknown): { ok: true; manifest: unknown } | { ok: false; errors: unknown[] };
+  thumbprint(jwk: JsonWebKey): string;
+  signJws(typ: string, claims: object, key: { publicJwk: JsonWebKey; privateKey: CryptoKey; kid: string }): Promise<string>;
 }
 
 const REQUIRED_SCRIPTS = ["typecheck", "lint", "test"] as const;
@@ -85,10 +136,26 @@ function log(msg: string): void {
 // ---------- pure helpers (unit tested) ----------
 
 export function channelForVersion(version: string): Channel {
-  const pre = version.split("-").slice(1).join("-");
-  if (!pre) return "stable";
-  if (/^(rc|beta)(\.|$)/.test(pre)) return "beta";
-  return "dev";
+  return version.includes("-") ? "dev" : "stable";
+}
+
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/** `<prefix>_<ULID>` (CORE §1). */
+export function newId(prefix: string, now = Date.now(), rand: Uint8Array = randomBytes(10)): string {
+  let t = "";
+  let ms = now;
+  for (let i = 0; i < 10; i++) {
+    t = CROCKFORD[ms % 32] + t;
+    ms = Math.floor(ms / 32);
+  }
+  let bits = 0n;
+  for (const b of rand) bits = (bits << 8n) | BigInt(b);
+  let r = "";
+  for (let i = 0; i < 16; i++) {
+    r = CROCKFORD[Number(bits & 31n)] + r;
+    bits >>= 5n;
+  }
+  return `${prefix}_${t}${r}`;
 }
 
 export function versionFromTag(tag: string): string {
@@ -126,13 +193,14 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (typeof dockerfile !== "string" || !safeRel(dockerfile)) throw new Error(`images[${i}].dockerfile must be a relative path`);
     const product = r.product;
     if (typeof product !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(product)) throw new Error(`images[${i}].product required (lowercase id)`);
-    const productKind = r.productKind;
-    if (!["miniapp", "bridge", "portal", "service"].includes(productKind as string))
-      throw new Error(`images[${i}].productKind must be miniapp|bridge|portal|service`);
+    const kind = r.kind;
+    if (!["app", "bridge", "portal"].includes(kind as string)) throw new Error(`images[${i}].kind must be app|bridge|portal`);
     const manifest = r.manifest;
     if (manifest !== undefined && (typeof manifest !== "string" || !safeRel(manifest))) throw new Error(`images[${i}].manifest must be a relative path`);
-    if (productKind === "miniapp" && manifest === undefined) throw new Error(`images[${i}]: a miniapp image needs manifest`);
-    return { name, context, dockerfile, product, productKind: productKind as ImageSpec["productKind"], ...(manifest ? { manifest } : {}) };
+    if (kind === "app" && manifest === undefined) throw new Error(`images[${i}]: an app image needs manifest (${MANIFEST_FILE})`);
+    const upgradeFrom = r.upgradeFrom ?? "*";
+    if (typeof upgradeFrom !== "string" || upgradeFrom.length === 0) throw new Error(`images[${i}].upgradeFrom must be a semver range`);
+    return { name, context, dockerfile, product, kind: kind as ImageKind, upgradeFrom, ...(manifest ? { manifest } : {}) };
   });
   return { kind, paths, conformance, images };
 }
@@ -217,35 +285,74 @@ export function releaseUrl(repo: string, dir: string, name: string, version: str
   return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${tarballName(name, version)}`;
 }
 
-export function keyId(publicKeyPem: string): string {
-  const der = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" });
-  return createHash("sha256").update(der).digest("hex").slice(0, 16);
+/** Merge new releases into the index. Releases are immutable: (product, version) never changes its image or artifact. */
+export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string): ReleaseIndex {
+  const releases = [...(prev?.releases ?? [])];
+  for (const r of add) {
+    if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
+      throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
+    if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
+    const old = releases.find((x) => x.product === r.product && x.version === r.version);
+    if (old) {
+      if (old.image !== r.image || old.artifact?.sha256 !== r.artifact?.sha256 || old.manifestDigest !== r.manifestDigest || old.source?.ref !== r.source?.ref)
+        throw new Error(`${r.product}@${r.version} is already released with other content (releases are immutable; ship a new version)`);
+      continue;
+    }
+    releases.push(r);
+  }
+  releases.sort((x, y) => (x.product === y.product ? x.publishedAt.localeCompare(y.publishedAt) : x.product.localeCompare(y.product)));
+  return { schema: INDEX_SCHEMA, generatedAt: now, releases, offers };
 }
 
-export function signBytes(privateKeyPem: string, data: Uint8Array): string {
-  return sign(null, data, createPrivateKey(privateKeyPem)).toString("base64");
+export function validateOffers(raw: unknown): Offer[] {
+  if (!Array.isArray(raw)) throw new Error("offers.json must be an array");
+  const ids = new Set<string>();
+  return raw.map((o, i) => {
+    const r = o as Record<string, unknown>;
+    const fail = (m: string): never => {
+      throw new Error(`offers[${i}]: ${m}`);
+    };
+    if (typeof r.id !== "string" || !/^off_[0-9A-HJKMNP-TV-Z]{26}$/.test(r.id)) fail("id must be off_<ULID>");
+    if (ids.has(r.id as string)) fail("duplicate id");
+    ids.add(r.id as string);
+    if (r.kind !== "single" && r.kind !== "bundle") fail("kind single|bundle");
+    if (!Array.isArray(r.products) || r.products.length === 0) fail("products required");
+    if (r.kind === "single" && (r.products as unknown[]).length !== 1) fail("a single offer has exactly one product");
+    if (!Number.isInteger(r.major) || (r.major as number) < 0) fail("major");
+    if (!Number.isInteger(r.amount) || (r.amount as number) <= 0) fail("amount (minor units)");
+    if (typeof r.currency !== "string" || !/^[a-z]{3}$/.test(r.currency)) fail("currency (ISO lower case)");
+    for (const k of ["name", "taxNote"]) if (typeof r[k] !== "string" || !(r[k] as string)) fail(k);
+    const sp = r.stripePrice as Record<string, unknown> | undefined;
+    if (!sp || !("test" in sp) || !("live" in sp)) fail("stripePrice {test, live}");
+    for (const m of ["test", "live"] as const) {
+      const v = (sp as Record<string, unknown>)[m];
+      if (v !== null && (typeof v !== "string" || !/^price_[A-Za-z0-9]+$/.test(v))) fail(`stripePrice.${m} must be price_… or null`);
+    }
+    return r as unknown as Offer;
+  });
 }
 
-export function verifyBytes(publicKeyPem: string, data: Uint8Array, sigB64: string): boolean {
-  return verify(null, data, createPublicKey(publicKeyPem), Buffer.from(sigB64, "base64"));
+export function envelopeClaims(index: ReleaseIndex, indexDigest: string, nowS: number): IndexEnvelopeClaims {
+  return {
+    iss: INDEX_ISS,
+    aud: INDEX_AUD,
+    iat: nowS,
+    exp: nowS + ENVELOPE_LIFETIME_S,
+    schema: INDEX_SCHEMA,
+    indexDigest,
+    releases: index.releases.length,
+    offers: index.offers.length,
+  };
 }
 
 export function serializeIndex(index: ReleaseIndex): string {
   return `${JSON.stringify(index, null, 2)}\n`;
 }
 
-export function addToIndex(prev: ReleaseIndex | null, records: ReleaseRecord[], kid: string, now: string): ReleaseIndex {
-  const byId = new Map<string, ReleaseRecord>();
-  for (const r of prev?.releases ?? []) byId.set(r.releaseId, r);
-  for (const r of records) {
-    const old = byId.get(r.releaseId);
-    if (old && old.imageDigest !== r.imageDigest) throw new Error(`${r.releaseId} already released with another image digest (releases are immutable)`);
-    byId.set(r.releaseId, r);
-  }
-  const releases = [...byId.values()].sort((a, b) =>
-    a.product === b.product ? a.publishedAt.localeCompare(b.publishedAt) : a.product.localeCompare(b.product),
-  );
-  return { schema: INDEX_SCHEMA, kid, generatedAt: now, releases };
+/** Skills archive (C17): one JSON document with every manifest skill file; skillsDigest = digest(archive). */
+export function skillsArchive(manifest: { skills?: { id: string; file: string }[] }, readFile: (rel: string) => string) {
+  const files = (manifest.skills ?? []).map((sk) => ({ id: sk.id, file: sk.file, content: readFile(sk.file) })).sort((a, b) => a.id.localeCompare(b.id));
+  return { schema: "opt2.skills-archive/v1", files };
 }
 
 export function renderImagesScript(cfg: CiConfig, repoName: string): string {
@@ -478,10 +585,10 @@ async function gh(
   return { status: res.status, json };
 }
 
-async function ensureRelease(repo: string, tag: string, prerelease: boolean): Promise<number> {
+async function ensureRelease(repo: string, tag: string, prerelease: boolean, target?: string): Promise<number> {
   const got = await gh("GET", `/repos/${OWNER}/${repo}/releases/tags/${tag}`);
   if (got.status === 200) return got.json.id as number;
-  const made = await gh("POST", `/repos/${OWNER}/${repo}/releases`, { tag_name: tag, name: tag, prerelease });
+  const made = await gh("POST", `/repos/${OWNER}/${repo}/releases`, { tag_name: tag, name: tag, prerelease, ...(target ? { target_commitish: target } : {}) });
   if (made.status !== 201) fail(`create release ${tag}: HTTP ${made.status}`);
   return made.json.id as number;
 }
@@ -499,45 +606,94 @@ async function uploadAsset(repo: string, releaseId: number, name: string, data: 
   if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
 }
 
-async function updateRegistry(records: ReleaseRecord[], keyPem: string): Promise<void> {
-  const pub = createPublicKey(keyPem).export({ type: "spki", format: "pem" }).toString();
-  const kid = keyId(pub);
+async function loadManifestPkg(root: string): Promise<ManifestPkg> {
+  const override = process.env.TB_MANIFEST_MODULE; // local path to a built package (development)
+  let entry: string;
+  if (override) {
+    entry = resolve(override);
+  } else {
+    const url = process.env.TB_MANIFEST_PKG;
+    if (!url || !RELEASE_URL_RE.test(url)) fail("TB_MANIFEST_PKG must be the @opt2-tealbrick/manifest GitHub release tarball URL");
+    const dir = join(root, ".tb-ci/pkgs");
+    mkdirSync(dir, { recursive: true });
+    if (!existsSync(join(dir, "package.json"))) writeFileSync(join(dir, "package.json"), '{"private":true}\n');
+    sh("npm", ["install", "--no-save", "--no-audit", "--no-fund", url], dir);
+    const pkgDir = join(dir, "node_modules/@opt2-tealbrick/manifest");
+    const pj = readJson(join(pkgDir, "package.json")) as { exports?: unknown; main?: string };
+    const ex = pj.exports as Record<string, unknown> | string | undefined;
+    const dot = typeof ex === "string" ? ex : ((ex?.["."] ?? ex) as Record<string, string> | string | undefined);
+    const rel = typeof dot === "string" ? dot : (dot?.import ?? dot?.default ?? pj.main);
+    if (!rel) fail("cannot find the entry point of @opt2-tealbrick/manifest");
+    entry = join(pkgDir, rel);
+  }
+  const mod = (await import(pathToFileURL(entry).href)) as Partial<ManifestPkg>;
+  for (const f of ["digest", "manifestDigest", "validateManifest", "thumbprint", "signJws"] as const)
+    if (typeof mod[f] !== "function") fail(`@opt2-tealbrick/manifest does not export ${f}`);
+  return mod as ManifestPkg;
+}
+
+async function loadSigningKey(m: ManifestPkg): Promise<{ publicJwk: JsonWebKey; privateKey: CryptoKey; kid: string }> {
+  const pem = process.env.RELEASE_SIGNING_KEY ?? (process.env.RELEASE_SIGNING_KEY_FILE ? readFileSync(process.env.RELEASE_SIGNING_KEY_FILE, "utf8") : "");
+  if (!pem) fail("RELEASE_SIGNING_KEY (Woodpecker secret release_signing_key) or RELEASE_SIGNING_KEY_FILE is missing");
+  const priv = createPrivateKey(pem);
+  const publicJwk = createPublicKey(priv).export({ format: "jwk" }) as JsonWebKey;
+  const der = priv.export({ type: "pkcs8", format: "der" });
+  const privateKey = await crypto.subtle.importKey("pkcs8", der, { name: "Ed25519" }, false, ["sign"]);
+  return { publicJwk, privateKey, kid: m.thumbprint(publicJwk) };
+}
+
+async function ghFile(path: string, ref: string): Promise<string | null> {
+  const r = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/contents/${path}?ref=${ref}`);
+  if (r.status === 404) return null;
+  if (r.status !== 200) fail(`read ${path}: HTTP ${r.status}`);
+  return Buffer.from(r.json.content as string, "base64").toString("utf8");
+}
+
+/** Read index + offers at main, merge, re-sign with the manifest package, commit to main (fast-forward), publish release assets. */
+async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise<void> {
+  // Unsigned mode exists only until the spec defines the release-index typ (REQUESTS "platform: release index typ").
+  const signed = process.env.TB_REGISTRY_UNSIGNED !== "1";
+  if (signed && !m) fail("signing needs @opt2-tealbrick/manifest");
+  const key = signed && m ? await loadSigningKey(m) : null;
+  if (key && m) {
+    const pubKeys = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../registry/keys.json"), "utf8")) as { keys: JsonWebKey[] };
+    if (!pubKeys.keys.some((k) => m.thumbprint(k) === key.kid)) fail(`signing key ${key.kid} is not in registry/keys.json`);
+  }
   for (let attempt = 1; attempt <= 5; attempt++) {
     const ref = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/git/ref/heads/main`);
     if (ref.status !== 200) fail(`registry: read main: HTTP ${ref.status}`);
     const headSha = ref.json.object.sha as string;
-    const cur = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/contents/${INDEX_PATH}?ref=${headSha}`);
-    let prev: ReleaseIndex | null = null;
-    if (cur.status === 200) {
-      const prevText = Buffer.from(cur.json.content as string, "base64").toString("utf8");
-      const sigRes = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/contents/${INDEX_SIG_PATH}?ref=${headSha}`);
-      const prevSig =
-        sigRes.status === 200
-          ? Buffer.from(sigRes.json.content as string, "base64")
-              .toString("utf8")
-              .trim()
-          : "";
-      if (!verifyBytes(pub, new TextEncoder().encode(prevText), prevSig))
-        fail("registry: current index signature does not verify with the release key; refusing to extend it");
-      prev = JSON.parse(prevText) as ReleaseIndex;
-    }
-    const next = serializeIndex(addToIndex(prev, records, kid, new Date().toISOString()));
-    const sig = `${signBytes(keyPem, new TextEncoder().encode(next))}\n`;
+    const prevText = await ghFile(INDEX_PATH, headSha);
+    const prev = prevText ? (JSON.parse(prevText) as ReleaseIndex) : null;
+    if (prev && prev.schema !== INDEX_SCHEMA) fail(`registry: unexpected schema ${prev.schema}`);
+    const offersText = await ghFile(OFFERS_PATH, headSha);
+    const offers = validateOffers(offersText ? JSON.parse(offersText) : []);
+    const index = mergeIndex(prev, add, offers, new Date().toISOString());
+    const body = serializeIndex(index);
+    const jws = key && m ? `${await m.signJws(INDEX_TYP, envelopeClaims(index, m.digest(index), Math.floor(Date.now() / 1000)), key)}\n` : null;
     const commit = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits/${headSha}`);
+    const hasEnvelope = (await ghFile(ENVELOPE_PATH, headSha)) !== null;
     const tree = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/trees`, {
       base_tree: commit.json.tree.sha,
       tree: [
-        { path: INDEX_PATH, mode: "100644", type: "blob", content: next },
-        { path: INDEX_SIG_PATH, mode: "100644", type: "blob", content: sig },
+        { path: INDEX_PATH, mode: "100644", type: "blob", content: body },
+        ...(jws
+          ? [{ path: ENVELOPE_PATH, mode: "100644", type: "blob", content: jws }]
+          : hasEnvelope
+            ? [{ path: ENVELOPE_PATH, mode: "100644", type: "blob", sha: null }]
+            : []),
       ],
     });
     if (tree.status !== 201) fail(`registry: create tree: HTTP ${tree.status}`);
-    const msg = `registry: ${records.map((r) => r.releaseId).join(", ")}`;
+    const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}`;
     const nc = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits`, { message: msg, tree: tree.json.sha, parents: [headSha] });
     if (nc.status !== 201) fail(`registry: create commit: HTTP ${nc.status}`);
     const upd = await gh("PATCH", `/repos/${OWNER}/${PLATFORM_REPO}/git/refs/heads/main`, { sha: nc.json.sha, force: false });
     if (upd.status === 200) {
-      log(`registry updated: ${msg}`);
+      const rel = await ensureRelease(PLATFORM_REPO, REGISTRY_RELEASE_TAG, false, nc.json.sha as string);
+      await uploadAsset(PLATFORM_REPO, rel, "index.json", body);
+      if (jws) await uploadAsset(PLATFORM_REPO, rel, "index.jws", jws);
+      log(`${msg}; published https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/index.jws`);
       return;
     }
     log(`registry: main moved (HTTP ${upd.status}), retry ${attempt}/5`);
@@ -553,56 +709,187 @@ async function cmdReleaseRecord(): Promise<void> {
   const tag = process.env.CI_COMMIT_TAG;
   const commit = process.env.CI_COMMIT_SHA;
   if (!tag || !commit) fail("release-record runs on tag events only (CI_COMMIT_TAG, CI_COMMIT_SHA)");
-  const version = (() => {
-    try {
-      return versionFromTag(tag);
-    } catch (e) {
-      fail((e as Error).message);
-    }
-  })();
-  if (cfg.images.length === 0) {
-    log("no images declared: no release record (libraries are consumed as git tags)");
+  let version: string;
+  try {
+    version = versionFromTag(tag);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const entries = cfg.images.filter((im) => im.kind !== "portal");
+  if (entries.length === 0) {
+    log("no app/bridge images declared: no release-index entry");
     return;
   }
-  const keyPem = process.env.RELEASE_SIGNING_KEY;
-  if (!keyPem) fail("Woodpecker secret release_signing_key is missing");
+  const m = await loadManifestPkg(root);
   const channel = channelForVersion(version);
   const now = new Date().toISOString();
-  const records: ReleaseRecord[] = cfg.images.map((im) => {
+  const releaseId = await ensureRelease(repo, tag, channel !== "stable");
+  const add: IndexRelease[] = [];
+  for (const im of entries) {
     const dfile = join(root, ".tb-ci/digests", `${im.name}.digest`);
     if (!existsSync(dfile)) fail(`digest for ${im.name} missing (image-publish must run first)`);
     const imageDigest = readFileSync(dfile, "utf8").trim();
     if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) fail(`bad digest for ${im.name}`);
-    const manifestDigest = im.manifest
-      ? `sha256:${createHash("sha256")
-          .update(readFileSync(join(root, im.manifest)))
-          .digest("hex")}`
-      : null;
-    return {
-      schema: RECORD_SCHEMA,
-      releaseId: `${im.product}@${version}`,
+    let manifestDigest: string | null = null;
+    let manifestUrl: string | null = null;
+    let skillsDigest: string | null = null;
+    if (im.manifest) {
+      const text = readFileSync(join(root, im.manifest), "utf8");
+      const v = m.validateManifest(JSON.parse(text));
+      if (!v.ok) fail(`${im.manifest} is invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
+      const man = v.manifest as { id?: string; version?: string; skills?: { id: string; file: string }[] };
+      if (man.id !== im.product) fail(`manifest id ${man.id} != image product ${im.product}`);
+      if (man.version !== version) fail(`manifest version ${man.version} != tag version ${version}`);
+      manifestDigest = m.manifestDigest(v.manifest);
+      await uploadAsset(repo, releaseId, MANIFEST_FILE, text);
+      manifestUrl = `https://github.com/${OWNER}/${repo}/releases/download/${tag}/${MANIFEST_FILE}`;
+      const archive = skillsArchive(man, (rel) => readFileSync(join(root, dirname(im.manifest as string), rel), "utf8"));
+      skillsDigest = m.digest(archive);
+      await uploadAsset(repo, releaseId, `skills-${im.product}.json`, `${JSON.stringify(archive)}\n`);
+    }
+    add.push({
+      id: newId("rel"),
       product: im.product,
-      productKind: im.productKind,
+      kind: im.kind === "bridge" ? "bridge" : "app",
       version,
       channel,
+      manifestDigest,
+      manifestUrl,
+      skillsDigest,
+      image: `${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`,
+      artifact: null,
+      source: null,
+      minOs: null,
+      notarized: null,
+      upgradeFrom: im.upgradeFrom,
       repo: `${OWNER}/${repo}`,
       commit,
       tag,
-      image: `${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`,
-      imageDigest,
-      manifestDigest,
-      manifestUrl: im.manifest ? `https://raw.githubusercontent.com/${OWNER}/${repo}/${tag}/${im.manifest}` : null,
       publishedAt: now,
-    };
-  });
-  const releaseId = await ensureRelease(repo, tag, channel !== "stable");
-  for (const r of records) {
-    const body = `${JSON.stringify(r, null, 2)}\n`;
-    await uploadAsset(repo, releaseId, `release-record-${r.product}.json`, body);
-    await uploadAsset(repo, releaseId, `release-record-${r.product}.json.sig`, `${signBytes(keyPem, new TextEncoder().encode(body))}\n`);
-    log(`release record ${r.releaseId} (${r.channel}) ${r.image}`);
+    });
+    log(`release ${im.product}@${version} (${channel}) ${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`);
   }
-  await updateRegistry(records, keyPem);
+  await publishIndex(m, add);
+}
+
+function argValue(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+/** TBD desktop release (C24): run on the release Mac after the notarized artifact is on the GitHub release. */
+async function cmdRegistryAddDesktop(args: string[]): Promise<void> {
+  const product = argValue(args, "--product") ?? "tbd";
+  const version = argValue(args, "--version");
+  const url = argValue(args, "--url");
+  const sha256 = argValue(args, "--sha256");
+  const minOs = argValue(args, "--min-os") ?? "14.0";
+  const upgradeFrom = argValue(args, "--upgrade-from") ?? "*";
+  const notarized = !args.includes("--not-notarized");
+  if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) fail("--version <semver> required");
+  if (!url || !/^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\//.test(url))
+    fail("--url must be a GitHub release asset URL of an opt2 repo");
+  if (!sha256 || !/^[0-9a-f]{64}$/.test(sha256)) fail("--sha256 <hex> required");
+  const res = await fetch(url, { redirect: "follow" });
+  if (!res.ok) fail(`artifact not reachable: HTTP ${res.status}`);
+  const got = createHash("sha256")
+    .update(Buffer.from(await res.arrayBuffer()))
+    .digest("hex");
+  if (got !== sha256) fail(`artifact sha256 mismatch (downloaded ${got})`);
+  const m = await loadManifestPkg(repoRoot());
+  const repo = url.split("/")[4];
+  await publishIndex(m, [
+    {
+      id: newId("rel"),
+      product,
+      kind: "desktop",
+      version,
+      channel: channelForVersion(version),
+      manifestDigest: null,
+      manifestUrl: null,
+      skillsDigest: null,
+      image: null,
+      artifact: { url, sha256: `sha256:${sha256}` },
+      source: null,
+      minOs,
+      notarized,
+      upgradeFrom,
+      repo: `${OWNER}/${repo}`,
+      commit: null,
+      tag: url.split("/")[7] ?? null,
+      publishedAt: new Date().toISOString(),
+    },
+  ]);
+}
+
+async function cmdRegistrySign(): Promise<void> {
+  await publishIndex(process.env.TB_REGISTRY_UNSIGNED === "1" ? null : await loadManifestPkg(repoRoot()), []);
+}
+
+/** C29 interim (no ghcr token yet): a dev-channel entry built from source at a pushed commit. */
+async function cmdRegistryAddSource(args: string[]): Promise<void> {
+  const product = argValue(args, "--product");
+  const kind = argValue(args, "--kind") ?? "app";
+  const repo = argValue(args, "--repo");
+  const ref = argValue(args, "--ref");
+  const dockerfile = argValue(args, "--dockerfile") ?? "Dockerfile";
+  const version = argValue(args, "--version");
+  const manifestPath = argValue(args, "--manifest");
+  const upgradeFrom = argValue(args, "--upgrade-from") ?? "*";
+  if (!product || !/^[a-z0-9][a-z0-9-]*$/.test(product)) fail("--product <id> required");
+  if (kind !== "app" && kind !== "bridge") fail("--kind app|bridge");
+  if (!repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo)) fail("--repo opt2-tealbrick-<name> required");
+  if (!ref || !/^[0-9a-f]{40}$/.test(ref)) fail("--ref <full commit sha> required");
+  if (!version || !version.includes("-")) fail("--version must be a prerelease semver (source builds are channel dev)");
+  if (kind === "app" && !manifestPath) fail(`--manifest <path to ${MANIFEST_FILE}> required for apps`);
+  const raw = (path: string) => `https://raw.githubusercontent.com/${OWNER}/${repo}/${ref}/${path}`;
+  const df = await fetch(raw(dockerfile));
+  if (!df.ok) fail(`${dockerfile} not found at ${repo}@${ref} (HTTP ${df.status}); push it first`);
+  let manifestDigest: string | null = null;
+  let skillsDigest: string | null = null;
+  let m: ManifestPkg | null = null;
+  if (manifestPath) {
+    m = await loadManifestPkg(repoRoot());
+    const res = await fetch(raw(manifestPath));
+    if (!res.ok) fail(`${manifestPath} not found at ${repo}@${ref}`);
+    const v = m.validateManifest(JSON.parse(await res.text()));
+    if (!v.ok) fail(`manifest invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
+    const man = v.manifest as { id?: string; version?: string; skills?: { id: string; file: string }[] };
+    if (man.id !== product || man.version !== version) fail(`manifest id/version ${man.id}@${man.version} != ${product}@${version}`);
+    manifestDigest = m.manifestDigest(v.manifest);
+    const base = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1) : "";
+    const files = new Map<string, string>();
+    for (const sk of man.skills ?? []) {
+      const r = await fetch(raw(base + sk.file));
+      if (!r.ok) fail(`skill file ${sk.file} missing`);
+      files.set(sk.file, await r.text());
+    }
+    skillsDigest = m.digest(skillsArchive(man, (f) => files.get(f) ?? ""));
+  } else if (process.env.TB_REGISTRY_UNSIGNED !== "1") {
+    m = await loadManifestPkg(repoRoot());
+  }
+  await publishIndex(m, [
+    {
+      id: newId("rel"),
+      product,
+      kind,
+      version,
+      channel: "dev",
+      manifestDigest,
+      manifestUrl: manifestPath ? raw(manifestPath) : null,
+      skillsDigest,
+      image: null,
+      artifact: null,
+      source: { repo: `${OWNER}/${repo}`, ref, dockerfile },
+      minOs: null,
+      notarized: null,
+      upgradeFrom,
+      repo: `${OWNER}/${repo}`,
+      commit: ref,
+      tag: null,
+      publishedAt: new Date().toISOString(),
+    },
+  ]);
 }
 
 interface WsPackage {
@@ -733,16 +1020,6 @@ function cmdStamp(): void {
   log(`stamped runner sha256 ${sha}`);
 }
 
-function cmdKeygen(out: string | undefined): void {
-  if (!out) fail("usage: keygen <outDir>");
-  mkdirSync(out, { recursive: true, mode: 0o700 });
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const pub = publicKey.export({ type: "spki", format: "pem" }).toString();
-  writeFileSync(join(out, "release-key.pem"), privateKey.export({ type: "pkcs8", format: "pem" }).toString(), { mode: 0o600 });
-  writeFileSync(join(out, "release-key.pub.pem"), pub);
-  log(`wrote ${out}/release-key.pem (private, 0600, never commit) and release-key.pub.pem; kid ${keyId(pub)}`);
-}
-
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
@@ -762,10 +1039,16 @@ async function main(argv: string[]): Promise<void> {
       return cmdAdopt(rest);
     case "stamp":
       return cmdStamp();
-    case "keygen":
-      return cmdKeygen(rest[0]);
+    case "registry-add-desktop":
+      return cmdRegistryAddDesktop(rest);
+    case "registry-sign":
+      return cmdRegistrySign();
+    case "registry-add-source":
+      return cmdRegistryAddSource(rest);
     default:
-      fail("usage: tb-ci setup|install|run <script>|plan-images|release-record|package-release|adopt|stamp|keygen");
+      fail(
+        "usage: tb-ci setup|install|run <script>|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
+      );
   }
 }
 

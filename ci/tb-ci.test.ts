@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
 import { test } from "node:test";
 import {
-  addToIndex,
   channelForVersion,
   checkDependencies,
   checkPackageJson,
-  keyId,
+  envelopeClaims,
+  type IndexRelease,
+  mergeIndex,
+  newId,
   parsePackageTag,
-  type ReleaseRecord,
   releaseUrl,
   renderImagesScript,
   serializeIndex,
-  signBytes,
+  skillsArchive,
   tarballName,
   validateConfig,
-  verifyBytes,
+  validateOffers,
   versionFromTag,
   workspaceGlobs,
 } from "./tb-ci.ts";
@@ -24,8 +24,8 @@ const repo = "opt2-tealbrick-knowledge";
 
 test("channel from version", () => {
   assert.equal(channelForVersion("1.2.3"), "stable");
-  assert.equal(channelForVersion("1.2.3-rc.1"), "beta");
-  assert.equal(channelForVersion("1.2.3-beta.4"), "beta");
+  assert.equal(channelForVersion("1.2.3-rc.1"), "dev");
+  assert.equal(channelForVersion("1.2.3-beta.4"), "dev");
   assert.equal(channelForVersion("1.2.3-dev.7"), "dev");
   assert.equal(channelForVersion("1.2.3-alpha.1"), "dev");
 });
@@ -38,10 +38,7 @@ test("version from tag rejects non-semver and build metadata", () => {
 });
 
 test("config defaults and validation", () => {
-  const c = validateConfig(
-    { kind: "miniapp", images: [{ name: repo, product: "knowledge", productKind: "miniapp", manifest: "tealbrick.manifest.json" }] },
-    repo,
-  );
+  const c = validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app", manifest: "tealbrick.manifest.json" }] }, repo);
   assert.equal(c.conformance, true);
   assert.deepEqual(c.paths, ["."]);
   assert.equal(c.images[0].dockerfile, "Dockerfile");
@@ -49,8 +46,9 @@ test("config defaults and validation", () => {
   assert.throws(() => validateConfig({ kind: "nope" }, repo), /kind/);
   assert.throws(() => validateConfig({ kind: "library", extra: 1 }, repo), /unknown field/);
   assert.throws(() => validateConfig({ kind: "library", paths: ["../x"] }, repo), /paths/);
-  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: "other-image", product: "x", productKind: "service" }] }, repo), /name/);
-  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", productKind: "miniapp" }] }, repo), /manifest/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: "other-image", product: "x", kind: "app" }] }, repo), /name/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app" }] }, repo), /manifest/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "k", kind: "service" }] }, repo), /app\|bridge\|portal/);
 });
 
 test("package.json rules: private, no publishConfig, required scripts", () => {
@@ -62,53 +60,96 @@ test("package.json rules: private, no publishConfig, required scripts", () => {
   assert.deepEqual(checkPackageJson({ private: true, scripts: { typecheck: "a", lint: "b", test: "c", conformance: "d" } }, cfg, "pkg"), []);
 });
 
-test("sign/verify roundtrip and tamper detection", () => {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const pub = publicKey.export({ type: "spki", format: "pem" }).toString();
-  const priv = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const data = new TextEncoder().encode("index");
-  const sig = signBytes(priv, data);
-  assert.ok(verifyBytes(pub, data, sig));
-  assert.ok(!verifyBytes(pub, new TextEncoder().encode("index2"), sig));
-  assert.match(keyId(pub), /^[0-9a-f]{16}$/);
-});
-
-const rec = (over: Partial<ReleaseRecord>): ReleaseRecord => ({
-  schema: "opt2.release-record/v1",
-  releaseId: "knowledge@0.1.0",
+const rel = (over: Partial<IndexRelease>): IndexRelease => ({
+  id: "rel_01JA0000000000000000000000",
   product: "knowledge",
-  productKind: "miniapp",
+  kind: "app",
   version: "0.1.0",
   channel: "stable",
+  manifestDigest: `sha256:${"c".repeat(64)}`,
+  manifestUrl: null,
+  skillsDigest: null,
+  image: `ghcr.io/martin-atrin/${repo}@sha256:${"a".repeat(64)}`,
+  artifact: null,
+  source: null,
+  minOs: null,
+  notarized: null,
+  upgradeFrom: "*",
   repo: `Martin-Atrin/${repo}`,
   commit: "abc",
   tag: "v0.1.0",
-  image: `ghcr.io/martin-atrin/${repo}@sha256:${"a".repeat(64)}`,
-  imageDigest: `sha256:${"a".repeat(64)}`,
-  manifestDigest: null,
-  manifestUrl: null,
   publishedAt: "2026-10-11T00:00:00.000Z",
   ...over,
 });
 
-test("index: add, idempotent re-add, immutable digest", () => {
-  const i1 = addToIndex(null, [rec({})], "k", "t1");
-  assert.equal(i1.releases.length, 1);
-  const i2 = addToIndex(i1, [rec({})], "k", "t2");
-  assert.equal(i2.releases.length, 1);
-  assert.throws(() => addToIndex(i1, [rec({ imageDigest: `sha256:${"b".repeat(64)}` })], "k", "t"), /immutable/);
-  const i3 = addToIndex(i2, [rec({ releaseId: "bridge@0.1.0", product: "bridge", productKind: "bridge" })], "k", "t3");
+test("ids are <prefix>_<ULID>", () => {
+  const id = newId("rel", 1760000000000, new Uint8Array(10));
+  assert.match(id, /^rel_[0-9A-HJKMNP-TV-Z]{26}$/);
+  assert.ok(id.endsWith("0000000000000000"));
+  assert.notEqual(newId("rel"), newId("rel"));
+});
+
+test("index merge: add, idempotent re-add, immutable content, desktop kind, offers carried", () => {
+  const i1 = mergeIndex(null, [rel({})], [], "t1");
+  assert.equal(i1.schema, "opt2.release-index/v2");
+  assert.equal(mergeIndex(i1, [rel({ id: "rel_other" })], [], "t2").releases.length, 1);
+  assert.throws(() => mergeIndex(i1, [rel({ image: `ghcr.io/martin-atrin/${repo}@sha256:${"b".repeat(64)}` })], [], "t"), /immutable/);
+  const desk = rel({ product: "tbd", kind: "desktop", image: null, manifestDigest: null, artifact: { url: "https://x", sha256: `sha256:${"d".repeat(64)}` } });
+  const i2 = mergeIndex(i1, [desk, rel({ product: "bridge", kind: "bridge", manifestDigest: null })], [], "t3");
   assert.deepEqual(
-    i3.releases.map((r) => r.product),
-    ["bridge", "knowledge"],
+    i2.releases.map((r) => r.product),
+    ["bridge", "knowledge", "tbd"],
   );
-  assert.ok(serializeIndex(i3).endsWith("\n"));
+  const src = { repo: "Martin-Atrin/opt2-tealbrick-bridge", ref: "f".repeat(40), dockerfile: "Dockerfile" };
+  assert.throws(() => mergeIndex(null, [rel({ image: null, source: src })], [], "t"), /stable release needs an image/);
+  assert.equal(mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null, source: src })], [], "t").releases.length, 1);
+  assert.throws(() => mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null })], [], "t"), /image or source/);
+  const env = envelopeClaims(i2, "sha256:x", 1000);
+  assert.equal(env.exp - env.iat, 180 * 86400);
+  assert.deepEqual([env.iss, env.aud, env.releases, env.offers], ["tb:releases", "tb:portal", 3, 0]);
+});
+
+test("offers validation", () => {
+  const ok = {
+    id: "off_01JA0000000000000000000000",
+    kind: "single",
+    name: "Knowledge",
+    products: ["knowledge"],
+    major: 0,
+    amount: 9900,
+    currency: "usd",
+    taxNote: "Tax added at checkout",
+    stripePrice: { test: "price_123", live: null },
+  };
+  assert.equal(validateOffers([ok]).length, 1);
+  assert.throws(() => validateOffers([{ ...ok, id: "knowledge-v1" }]), /off_/);
+  assert.throws(() => validateOffers([{ ...ok, products: ["a", "b"] }]), /exactly one/);
+  assert.throws(() => validateOffers([{ ...ok, stripePrice: { test: "sk_test_x", live: null } }]), /price_/);
+  assert.throws(() => validateOffers([ok, ok]), /duplicate/);
+});
+
+test("skills archive is sorted and complete", () => {
+  const a = skillsArchive(
+    {
+      skills: [
+        { id: "b", file: "skills/b/SKILL.md" },
+        { id: "a", file: "skills/a/SKILL.md" },
+      ],
+    },
+    (f) => `content of ${f}`,
+  );
+  assert.deepEqual(
+    a.files.map((f) => f.id),
+    ["a", "b"],
+  );
+  assert.equal(a.files[0].content, "content of skills/a/SKILL.md");
+  assert.equal(skillsArchive({}, () => "").files.length, 0);
 });
 
 test("images script: no-push on check, guarded publish", () => {
   const none = renderImagesScript(validateConfig({ kind: "library" }, repo), repo);
   assert.match(none, /nothing to build/);
-  const cfg = validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", productKind: "miniapp", manifest: "m.json" }] }, repo);
+  const cfg = validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app", manifest: "m.json" }] }, repo);
   const s = renderImagesScript(cfg, repo);
   assert.match(s, /--no-push/);
   assert.match(s, /ghcr_token is missing/);

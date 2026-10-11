@@ -44,7 +44,7 @@ Schema: `ci/tealbrick-ci.schema.json`. Example for a miniapp:
 ```json
 {
   "kind": "miniapp",
-  "images": [{ "name": "opt2-tealbrick-knowledge", "product": "knowledge", "productKind": "miniapp", "manifest": "tealbrick.manifest.json" }]
+  "images": [{ "name": "opt2-tealbrick-knowledge", "product": "knowledge", "kind": "app", "manifest": "tealbrick.manifest.json" }]
 }
 ```
 Image names are the repo name or `<repo>-<component>` (for example `opt2-tealbrick-bridge-server`).
