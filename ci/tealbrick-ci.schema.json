@@ -55,13 +55,18 @@
             "description": "App manifest path (required for miniapp)."
           },
           "kind": {
-            "enum": ["app", "bridge", "portal"],
-            "description": "app/bridge: release-index entry on v* tags; portal: image only."
+            "enum": ["app", "bridge", "portal", "service"],
+            "description": "app/bridge: release-index entry on v* tags; portal: image only; service: companion image of the app with the same product (BSA-01), digest recorded in that app's release entry."
           },
           "upgradeFrom": {
             "type": "string",
             "default": "*",
             "description": "semver range of versions allowed to update to this release"
+          },
+          "service": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "description": "kind service only: the manifest runtime.services[].id this image implements."
           }
         }
       }

@@ -4,7 +4,9 @@ import {
   channelForVersion,
   checkDependencies,
   checkPackageJson,
+  checkServiceImages,
   dockerfileVolumeLines,
+  expectedGenFiles,
   type IndexRelease,
   mergeIndex,
   newId,
@@ -50,7 +52,7 @@ test("config defaults and validation", () => {
   assert.throws(() => validateConfig({ kind: "library", paths: ["../x"] }, repo), /paths/);
   assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: "other-image", product: "x", kind: "app" }] }, repo), /name/);
   assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app" }] }, repo), /manifest/);
-  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "k", kind: "service" }] }, repo), /app\|bridge\|portal/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ name: repo, product: "k", kind: "worker" }] }, repo), /app\|bridge\|portal\|service/);
 });
 
 test("package.json rules: private, no publishConfig, required scripts", () => {
@@ -59,7 +61,11 @@ test("package.json rules: private, no publishConfig, required scripts", () => {
   assert.ok(errs.some((e) => e.includes("private")));
   assert.ok(errs.some((e) => e.includes("publishConfig")));
   assert.ok(errs.some((e) => e.includes('"conformance"')));
-  assert.deepEqual(checkPackageJson({ private: true, scripts: { typecheck: "a", lint: "b", test: "c", conformance: "d" } }, cfg, "pkg"), []);
+  assert.deepEqual(checkPackageJson({ private: true, scripts: { typecheck: "a", lint: "b", test: "c", conformance: "d", gen: "tb-gen all" } }, cfg, "pkg"), []);
+  assert.ok(
+    checkPackageJson({ private: true, scripts: { typecheck: "a", lint: "b", test: "c", conformance: "d" } }, cfg, "pkg").some((e) => e.includes('"gen"')),
+    "miniapp needs a gen script (BSA-03)",
+  );
 });
 
 const rel = (over: Partial<IndexRelease>): IndexRelease => ({
@@ -248,4 +254,27 @@ test("C42: VOLUME instruction detection", () => {
   assert.deepEqual(dockerfileVolumeLines("FROM node\n# VOLUME /data\nRUN mkdir -p /data && \\\n  echo VOLUME\nENV TB_DATA_DIR=/data"), []);
   assert.deepEqual(dockerfileVolumeLines("FROM node\nRUN echo a \\\n VOLUME /x\n"), [], "continuation lines are not instructions");
   assert.deepEqual(dockerfileVolumeLines("FROM node\nENV VOLUME_DIR=/data\n"), []);
+});
+
+test("BSA-01: service images belong to an app and match the manifest services", () => {
+  const app = { name: repo, product: "knowledge", kind: "app", manifest: "tealbrick.manifest.json" };
+  const svc = (id: string) => ({ name: `${repo}-${id}`, product: "knowledge", kind: "service", service: id, dockerfile: `services/${id}/Dockerfile` });
+  const cfg = validateConfig({ kind: "miniapp", images: [app, svc("gbrain"), svc("gbrain-db")] }, repo);
+  assert.equal(cfg.images.filter((i) => i.kind === "service").length, 2);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [svc("gbrain")] }, repo), /parent/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [app, { ...svc("x"), service: undefined }] }, repo), /needs service/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [app, svc("x"), { ...svc("x"), name: `${repo}-x2` }] }, repo), /twice/);
+  assert.throws(() => validateConfig({ kind: "miniapp", images: [{ ...app, service: "x" }] }, repo), /only allowed/);
+  const services = [
+    { id: "gbrain", build: {} },
+    { id: "gbrain-db", build: {} },
+    { id: "upstream", image: "x@sha256:1" },
+  ];
+  assert.deepEqual(checkServiceImages(cfg, "knowledge", services), []);
+  assert.match(checkServiceImages(cfg, "knowledge", [...services, { id: "notebook", build: {} }]).join(), /notebook has build but no images/);
+  assert.match(checkServiceImages(cfg, "knowledge", [{ id: "gbrain", build: {} }]).join(), /gbrain-db is not a manifest service/);
+});
+
+test("BSA-03: expected generated files", () => {
+  assert.deepEqual(expectedGenFiles("connect"), ["openapi/openapi.json", "kit/connect-kit/package.json", "docs/connect.md", "railway/railway.json"]);
 });

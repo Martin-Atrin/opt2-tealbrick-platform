@@ -4,6 +4,8 @@
 //   setup                       template drift + config + package rules
 //   install                     install dependencies per project path (frozen lockfile)
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
+//   gen                         BSA-03: committed gen/ not stale, `gen` script produces every tb-gen kind, tb-gen check passes
+//   kit-release                 (tag v*, miniapp) tb-gen kit --build -> kit tarball + sha256 on the GitHub release
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
 //   release-record              (tag v*) release entries (app|bridge) -> GitHub release assets + signed release index
 //   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
@@ -39,8 +41,9 @@ export const MANIFEST_FILE = "tealbrick.manifest.json";
 export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"] as const;
 export type Kind = (typeof KINDS)[number];
 
-/** Image kinds: `app` and `bridge` become release-index entries; `portal` images are published only (ours, not deployed into workspaces). */
-export type ImageKind = "app" | "bridge" | "portal";
+/** Image kinds: `app` and `bridge` become release-index entries; `portal` images are published only (ours, not deployed into workspaces);
+ *  `service` images (BSA-01) are companion containers of an app: built and published, digest recorded in the parent app's entry. */
+export type ImageKind = "app" | "bridge" | "portal" | "service";
 
 export interface ImageSpec {
   name: string; // ghcr image name, must start with the repo name
@@ -50,6 +53,7 @@ export interface ImageSpec {
   kind: ImageKind;
   manifest?: string; // app manifest path (required for kind app), relative to repo root
   upgradeFrom: string; // semver range of versions that may update to this release
+  service?: string; // kind service: the manifest runtime.services[].id this image is (product = the parent app's product)
 }
 
 export interface CiConfig {
@@ -74,6 +78,7 @@ export interface IndexRelease {
   artifact: { url: string; sha256: string } | null; // desktop
   source: { repo: string; ref: string; dockerfile: string } | null; // C29 interim: dev-channel source build until ghcr images exist
   runtime: BridgeRuntime | null; // kind bridge only (the bridge has no app manifest); apps take runtime from their manifest
+  services?: { id: string; image: string }[] | null; // app image releases: one published image per manifest service with `build` (BSA-01)
   minOs: string | null; // desktop
   notarized: boolean | null; // desktop
   upgradeFrom: string;
@@ -255,14 +260,33 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     const product = r.product;
     if (typeof product !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(product)) throw new Error(`images[${i}].product required (lowercase id)`);
     const kind = r.kind;
-    if (!["app", "bridge", "portal"].includes(kind as string)) throw new Error(`images[${i}].kind must be app|bridge|portal`);
+    if (!["app", "bridge", "portal", "service"].includes(kind as string)) throw new Error(`images[${i}].kind must be app|bridge|portal|service`);
+    const service = r.service;
+    if (kind === "service" && (typeof service !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(service)))
+      throw new Error(`images[${i}]: a service image needs service (the manifest runtime.services[].id)`);
+    if (kind !== "service" && service !== undefined) throw new Error(`images[${i}].service is only allowed for kind service`);
     const manifest = r.manifest;
     if (manifest !== undefined && (typeof manifest !== "string" || !safeRel(manifest))) throw new Error(`images[${i}].manifest must be a relative path`);
     if (kind === "app" && manifest === undefined) throw new Error(`images[${i}]: an app image needs manifest (${MANIFEST_FILE})`);
     const upgradeFrom = r.upgradeFrom ?? "*";
     if (typeof upgradeFrom !== "string" || upgradeFrom.length === 0) throw new Error(`images[${i}].upgradeFrom must be a semver range`);
-    return { name, context, dockerfile, product, kind: kind as ImageKind, upgradeFrom, ...(manifest ? { manifest } : {}) };
+    return {
+      name,
+      context,
+      dockerfile,
+      product,
+      kind: kind as ImageKind,
+      upgradeFrom,
+      ...(manifest ? { manifest } : {}),
+      ...(kind === "service" ? { service: service as string } : {}),
+    };
   });
+  for (const im of images.filter((x) => x.kind === "service")) {
+    if (!images.some((a) => a.kind === "app" && a.product === im.product))
+      throw new Error(`service image ${im.name}: no app image with product ${im.product} (its parent)`);
+    if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
+      throw new Error(`service ${im.product}/${im.service} declared twice`);
+  }
   return { kind, paths, conformance, images };
 }
 
@@ -271,7 +295,22 @@ function safeRel(p: string): boolean {
 }
 
 export function requiredScripts(cfg: CiConfig, multiPackage = false): string[] {
-  return [...REQUIRED_SCRIPTS, ...(cfg.conformance ? ["conformance"] : []), ...(multiPackage ? ["build"] : [])];
+  return [...REQUIRED_SCRIPTS, ...(cfg.conformance ? ["conformance"] : []), ...(multiPackage ? ["build"] : []), ...(cfg.kind === "miniapp" ? ["gen"] : [])];
+}
+
+/** BSA-03: the generated kinds `tb-gen all` must produce for a miniapp (relative to gen/). */
+export function expectedGenFiles(product: string): string[] {
+  return ["openapi/openapi.json", `kit/${product}-kit/package.json`, `docs/${product}.md`, "railway/railway.json"];
+}
+
+/** BSA-01: every manifest service built from source needs exactly one service image; returns problems. */
+export function checkServiceImages(cfg: CiConfig, appProduct: string, manifestServices: { id: string; build?: unknown; image?: unknown }[]): string[] {
+  const declared = cfg.images.filter((im) => im.kind === "service" && im.product === appProduct).map((im) => im.service as string);
+  const built = manifestServices.filter((s) => s.build).map((s) => s.id);
+  const errs: string[] = [];
+  for (const id of built) if (!declared.includes(id)) errs.push(`manifest service ${id} has build but no images[] entry of kind service (service: "${id}")`);
+  for (const id of declared) if (!built.includes(id)) errs.push(`images[] service ${id} is not a manifest service with build`);
+  return errs;
 }
 
 export function checkPackageJson(pkg: Record<string, unknown>, cfg: CiConfig, where: string, multiPackage = false): string[] {
@@ -349,7 +388,7 @@ export function releaseUrl(repo: string, dir: string, name: string, version: str
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
  *  A dev source build (C29) and the later stable image of the same version are two releases. */
 export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string, harnesses: Harness[] = []): ReleaseIndex {
-  const releases = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null }));
+  const releases: IndexRelease[] = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null, services: r.services ?? null }));
   for (const r of add) {
     if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
@@ -609,6 +648,10 @@ async function cmdSetup(): Promise<void> {
   for (const im of cfg.images) {
     if (!existsSync(join(root, im.dockerfile))) errors.push(`image ${im.name}: ${im.dockerfile} not found`);
     if (im.manifest && !existsSync(join(root, im.manifest))) errors.push(`image ${im.name}: manifest ${im.manifest} not found`);
+    if (im.kind === "app" && im.manifest && existsSync(join(root, im.manifest))) {
+      const man = JSON.parse(readFileSync(join(root, im.manifest), "utf8")) as { runtime?: { services?: { id: string; build?: unknown }[] } };
+      errors.push(...checkServiceImages(cfg, im.product, man.runtime?.services ?? []).map((e) => `image ${im.name}: ${e}`));
+    }
   }
   for (const df of findDockerfiles(root)) {
     const lines = dockerfileVolumeLines(readFileSync(join(root, df), "utf8"));
@@ -669,6 +712,68 @@ function cmdRun(script: string | undefined): void {
     }
     if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "run", script], dir);
     else sh("npm", ["run", script], dir);
+  }
+}
+
+function pmExec(dir: string, bin: string, args: string[]): void {
+  if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "exec", bin, ...args], dir);
+  else sh("npm", ["exec", "--no", "--", bin, ...args], dir);
+}
+
+/** BSA-03 gen stage: (1) a committed gen/ must not be stale, (2) the repo's `gen` script must really run `tb-gen all`, (3) the result passes `tb-gen check`. */
+function cmdGen(): void {
+  const root = repoRoot();
+  const cfg = loadConfig(root);
+  for (const p of nodePaths(cfg, root)) {
+    const dir = join(root, p);
+    const scripts = (readJson(join(dir, "package.json")).scripts ?? {}) as Record<string, string>;
+    const manifestPath = join(dir, MANIFEST_FILE);
+    if (!scripts.gen) {
+      if (cfg.kind === "miniapp") fail(`${p}: script "gen" is required for kind miniapp ("gen": "tb-gen all")`);
+      log(`SKIP gen in ${p}: no gen script`);
+      continue;
+    }
+    if (!existsSync(manifestPath)) fail(`${p}: ${MANIFEST_FILE} is required for the gen stage`);
+    const product = String((JSON.parse(readFileSync(manifestPath, "utf8")) as { id?: string }).id);
+    if (existsSync(join(dir, "gen"))) pmExec(dir, "tb-gen", ["check"]); // committed gen/ must equal the manifest
+    sh(packageManager(dir) === "pnpm" ? "corepack" : "npm", packageManager(dir) === "pnpm" ? ["pnpm", "run", "gen"] : ["run", "gen"], dir);
+    const missing = expectedGenFiles(product).filter((f) => !existsSync(join(dir, "gen", f)));
+    if (missing.length) fail(`${p}: the gen script did not produce ${missing.map((f) => `gen/${f}`).join(", ")} (it must run tb-gen all)`);
+    pmExec(dir, "tb-gen", ["check"]);
+    log(`gen OK in ${p} (${product})`);
+  }
+}
+
+/** BSA-03 on v* tags: build the per-app kit and attach tarball + sha256 to the GitHub release. */
+async function cmdKitRelease(): Promise<void> {
+  const root = repoRoot();
+  const cfg = loadConfig(root);
+  const tag = process.env.CI_COMMIT_TAG;
+  if (!tag) fail("kit-release runs on tag events only");
+  if (cfg.kind !== "miniapp") {
+    log("SKIP kit-release: not a miniapp");
+    return;
+  }
+  const repo = repoName(root);
+  let version: string;
+  try {
+    version = versionFromTag(tag);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const releaseId = await ensureRelease(repo, tag, channelForVersion(version) !== "stable");
+  for (const p of nodePaths(cfg, root)) {
+    const dir = join(root, p);
+    const out = join(root, ".tb-ci/kit", p.replaceAll("/", "_"));
+    mkdirSync(out, { recursive: true });
+    pmExec(dir, "tb-gen", ["kit", "--build", "--out", out]);
+    const tgz = readdirSync(out).filter((f) => f.endsWith(".tgz"));
+    if (tgz.length !== 1) fail(`${p}: expected one kit tarball in ${out}, found ${tgz.length}`);
+    const data = readFileSync(join(out, tgz[0]));
+    const sha = createHash("sha256").update(data).digest("hex");
+    await uploadFile(repo, releaseId, tgz[0], data, "application/gzip");
+    await uploadFile(repo, releaseId, `${tgz[0]}.sha256`, Buffer.from(`${sha}  ${tgz[0]}\n`), "text/plain");
+    log(`kit ${tgz[0]} attached to ${tag} (sha256 ${sha})`);
   }
 }
 
@@ -848,7 +953,7 @@ async function cmdReleaseRecord(): Promise<void> {
   } catch (e) {
     fail((e as Error).message);
   }
-  const entries = cfg.images.filter((im) => im.kind !== "portal");
+  const entries = cfg.images.filter((im) => im.kind === "app" || im.kind === "bridge");
   if (entries.length === 0) {
     log("no app/bridge images declared: no release-index entry");
     return;
@@ -870,9 +975,16 @@ async function cmdReleaseRecord(): Promise<void> {
       const text = readFileSync(join(root, im.manifest), "utf8");
       const v = m.validateManifest(JSON.parse(text));
       if (!v.ok) fail(`${im.manifest} is invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
-      const man = v.manifest as { id?: string; version?: string; skills?: { id: string; file: string }[] };
+      const man = v.manifest as {
+        id?: string;
+        version?: string;
+        skills?: { id: string; file: string }[];
+        runtime?: { services?: { id: string; build?: unknown }[] };
+      };
       if (man.id !== im.product) fail(`manifest id ${man.id} != image product ${im.product}`);
       if (man.version !== version) fail(`manifest version ${man.version} != tag version ${version}`);
+      const svcErrs = checkServiceImages(cfg, im.product, man.runtime?.services ?? []);
+      if (svcErrs.length) fail(svcErrs.join("; "));
       manifestDigest = m.manifestDigest(v.manifest);
       await uploadAsset(repo, releaseId, MANIFEST_FILE, text);
       manifestUrl = `https://github.com/${OWNER}/${repo}/releases/download/${tag}/${MANIFEST_FILE}`;
@@ -880,6 +992,16 @@ async function cmdReleaseRecord(): Promise<void> {
       skillsDigest = m.digest(archive);
       await uploadAsset(repo, releaseId, `skills-${im.product}.json`, `${JSON.stringify(archive)}\n`);
     }
+    const services = cfg.images
+      .filter((x) => x.kind === "service" && x.product === im.product)
+      .map((x) => {
+        const f = join(root, ".tb-ci/digests", `${x.name}.digest`);
+        if (!existsSync(f)) fail(`digest for service image ${x.name} missing (image-publish must run first)`);
+        const d = readFileSync(f, "utf8").trim();
+        if (!/^sha256:[0-9a-f]{64}$/.test(d)) fail(`bad digest for ${x.name}`);
+        return { id: x.service as string, image: `${IMAGE_NAMESPACE}/${x.name}@${d}` };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
     let runtime: BridgeRuntime | null = null;
     if (im.kind === "bridge") {
       const rf = join(root, dirname(im.dockerfile), "bridge-runtime.json");
@@ -899,6 +1021,7 @@ async function cmdReleaseRecord(): Promise<void> {
       artifact: null,
       source: null,
       runtime,
+      services: im.kind === "app" ? services : null,
       minOs: null,
       notarized: null,
       upgradeFrom: im.upgradeFrom,
@@ -1033,6 +1156,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
       artifact: null,
       source: { repo: `${OWNER}/${repo}`, ref, dockerfile },
       runtime,
+      services: null,
       minOs: null,
       notarized: null,
       upgradeFrom,
@@ -1188,6 +1312,10 @@ async function main(argv: string[]): Promise<void> {
       return cmdInstall();
     case "run":
       return cmdRun(rest[0]);
+    case "gen":
+      return cmdGen();
+    case "kit-release":
+      return cmdKitRelease();
     case "plan-images":
       return cmdPlanImages();
     case "release-record":
@@ -1206,7 +1334,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|kit-release|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
       );
   }
 }
