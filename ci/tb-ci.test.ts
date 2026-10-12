@@ -25,6 +25,7 @@ import {
   mergeIndex,
   missingPackTargets,
   newId,
+  normalizeDevOnly,
   PG_DONE_MARKER,
   PG_MARKER,
   PG_TEST_URL,
@@ -771,4 +772,58 @@ test("ci-v9.4: the registry-sync signer (ops/signer lockfile) validates holdFami
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+test("C113: devOnly mark + re-classification of an old stable record; identical copies folded, nothing else changes", () => {
+  const sample = (over: Partial<IndexRelease>) =>
+    rel({
+      product: "sample-gate",
+      repo: "Martin-Atrin/opt2-tealbrick-samples",
+      image: `ghcr.io/martin-atrin/opt2-tealbrick-samples-sample-gate@sha256:${"1".repeat(64)}`,
+      ...over,
+    });
+  const oldStable = sample({ id: "rel_01M4QCJ7T3NP5WQ2WWP5V1G7KY", version: "0.1.1", channel: "stable", publishedAt: "2026-10-11T00:00:00.000Z" });
+  const copyDev = sample({ id: "rel_01M4RTJ56HQH0BVWBTEBSSW7AC", version: "0.1.1", channel: "dev", publishedAt: "2026-10-12T19:48:56.000Z" });
+  const devOld = sample({
+    id: "rel_01M4QA48XR9QC5QRDSC4E1T6DT",
+    version: "0.1.0",
+    channel: "dev",
+    image: null,
+    source: { repo: "x/y", ref: "a".repeat(40), dockerfile: "Dockerfile" },
+  });
+  const other = rel({ id: "rel_01M4QA48XR9QC5QRDSC4E1T6D0", product: "connect", version: "0.5.0" });
+  const { releases, notes } = normalizeDevOnly([devOld, oldStable, other, copyDev]);
+  assert.deepEqual(
+    releases.map((r) => [r.id, r.channel, r.devOnly ?? null]),
+    [
+      [devOld.id, "dev", true],
+      [oldStable.id, "dev", true], // same id, re-classified
+      [other.id, "stable", null], // untouched, no devOnly key
+    ],
+  );
+  assert.equal("devOnly" in (releases[2] as object), false);
+  const kept = releases[1] as IndexRelease;
+  assert.equal(kept.image, oldStable.image);
+  assert.equal(kept.manifestDigest, oldStable.manifestDigest);
+  assert.equal(kept.publishedAt, oldStable.publishedAt);
+  assert.deepEqual(notes, [
+    `sample-gate@0.1.0 ${devOld.id} marked devOnly`,
+    `sample-gate@0.1.1 ${oldStable.id} re-classified stable -> dev`,
+    `sample-gate@0.1.1 ${copyDev.id} marked devOnly`,
+    `sample-gate@0.1.1 ${copyDev.id} folded into ${oldStable.id} (identical record)`,
+  ]);
+  assert.deepEqual(normalizeDevOnly(releases).notes, [], "idempotent");
+  // a copy with other content is never folded
+  assert.throws(() => normalizeDevOnly([oldStable, { ...copyDev, image: `ghcr.io/x@sha256:${"9".repeat(64)}` }]), /different content/);
+  // mergeIndex applies it: the next signed index carries the marks; a new dev sample release is marked too
+  const merged = mergeIndex(
+    { schema: "opt2.release-index/v2", generatedAt: "x", releases: [oldStable, copyDev, other], offers: [], harnesses: [] },
+    [sample({ id: "rel_01M4RV2CZHEB2D52KCSNGSB862", version: "0.2.0-dev.1", channel: "dev" })],
+    [],
+    "2026-10-13T00:00:00.000Z",
+  );
+  assert.deepEqual(
+    merged.releases.map((r) => `${r.product}@${r.version}@${r.channel}${r.devOnly ? "+devOnly" : ""}`),
+    ["connect@0.5.0@stable", "sample-gate@0.1.1@dev+devOnly", "sample-gate@0.2.0-dev.1@dev+devOnly"],
+  );
 });

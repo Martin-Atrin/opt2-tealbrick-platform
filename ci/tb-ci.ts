@@ -113,6 +113,7 @@ export interface IndexRelease {
   commit: string | null;
   tag: string | null;
   publishedAt: string;
+  devOnly?: true; // C113: DEV_ONLY_PRODUCTS (always channel dev); Core never offers or deploys it in a stable workspace
 }
 
 /** Deploy recipe facts for the bridge service (apps carry these in their manifest `runtime`). */
@@ -257,6 +258,44 @@ export const DEV_ONLY_PRODUCTS: readonly string[] = ["sample-gate", "sample-call
 
 export function isDevOnlyProduct(product: string): boolean {
   return DEV_ONLY_PRODUCTS.includes(product);
+}
+
+/** C113: every release of a DEV_ONLY product carries devOnly: true and channel dev. A stable record a pre-ci-v9.4
+ *  signer published is RE-CLASSIFIED to dev (same id, digests, image; nothing deleted). If that leaves two records with
+ *  the same (product, version, dev) and identical content, the earlier one (the original) is kept and the later copy is
+ *  folded into it; different content for the same key is refused. Other products are returned unchanged. Idempotent. */
+export function normalizeDevOnly(releases: IndexRelease[]): { releases: IndexRelease[]; notes: string[] } {
+  const notes: string[] = [];
+  const marked = releases.map((r) => {
+    if (!isDevOnlyProduct(r.product)) return r;
+    if (r.channel === "stable") notes.push(`${r.product}@${r.version} ${r.id} re-classified stable -> dev`);
+    else if (r.devOnly !== true) notes.push(`${r.product}@${r.version} ${r.id} marked devOnly`);
+    return { ...r, channel: "dev" as Channel, devOnly: true as const };
+  });
+  const same = (a: IndexRelease, b: IndexRelease) =>
+    a.image === b.image &&
+    a.manifestDigest === b.manifestDigest &&
+    a.skillsDigest === b.skillsDigest &&
+    a.commit === b.commit &&
+    a.source?.ref === b.source?.ref &&
+    JSON.stringify(a.services ?? null) === JSON.stringify(b.services ?? null);
+  const kept = new Map<string, IndexRelease>();
+  const out: IndexRelease[] = [];
+  for (const r of [...marked].sort((a, b) => a.publishedAt.localeCompare(b.publishedAt))) {
+    if (r.devOnly !== true) {
+      out.push(r);
+      continue;
+    }
+    const key = `${r.product}@${r.version}@${r.channel}`;
+    const first = kept.get(key);
+    if (!first) {
+      kept.set(key, r);
+      out.push(r);
+    } else if (same(first, r)) notes.push(`${r.product}@${r.version} ${r.id} folded into ${first.id} (identical record)`);
+    else throw new Error(`${r.product}@${r.version}: two dev records with different content (releases are immutable)`);
+  }
+  const keep = new Set(out);
+  return { releases: marked.filter((r) => keep.has(r)), notes }; // original order
 }
 
 /** The channel the signer indexes a release on: a dev-only product is always "dev", whatever its version says. */
@@ -585,6 +624,9 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
     }
     releases.push(r);
   }
+  const normalized = normalizeDevOnly(releases).releases; // C113
+  releases.length = 0;
+  releases.push(...normalized);
   releases.sort((x, y) => (x.product === y.product ? x.publishedAt.localeCompare(y.publishedAt) : x.product.localeCompare(y.product)));
   return { schema: INDEX_SCHEMA, generatedAt: now, releases, offers, harnesses };
 }
@@ -1397,6 +1439,7 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     const offers = validateOffers(offersText ? JSON.parse(offersText) : []);
     const harnessesText = await ghFile(HARNESSES_PATH, headSha);
     const harnesses = validateHarnesses(harnessesText ? JSON.parse(harnessesText) : []);
+    const devOnlyNotes = normalizeDevOnly(prev?.releases ?? []).notes; // C113: what this publish changes in existing records
     const index = mergeIndex(prev, add, offers, new Date().toISOString(), harnesses);
     const body = serializeIndex(index);
     let jws: string | null = null;
@@ -1422,7 +1465,9 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       ],
     });
     if (tree.status !== 201) fail(`registry: create tree: HTTP ${tree.status}`);
-    const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}`;
+    const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}${
+      devOnlyNotes.length ? `\n\nC113 (DEV_ONLY_PRODUCTS, digests unchanged):\n${devOnlyNotes.map((n) => `- ${n}`).join("\n")}` : ""
+    }`;
     const nc = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits`, { message: msg, tree: tree.json.sha, parents: [headSha] });
     if (nc.status !== 201) fail(`registry: create commit: HTTP ${nc.status}`);
     const upd = await gh("PATCH", `/repos/${OWNER}/${PLATFORM_REPO}/git/refs/heads/main`, { sha: nc.json.sha, force: false });
@@ -1733,7 +1778,8 @@ async function cmdRegistrySync(): Promise<void> {
   const env = await ghFile(ENVELOPE_PATH, "main");
   const exp = env ? (JSON.parse(Buffer.from(env.trim().split(".")[1], "base64url").toString("utf8")) as { exp: number }).exp : 0;
   const expiring = exp - Date.now() / 1000 < 30 * 86400;
-  if (add.length || offersChanged || harnessesChanged || expiring) await publishIndex(m, add);
+  const devOnlyChanged = normalizeDevOnly(index?.releases ?? []).notes.length > 0; // C113: mark/re-classify existing records
+  if (add.length || offersChanged || harnessesChanged || expiring || devOnlyChanged) await publishIndex(m, add);
   else log("registry-sync: nothing new");
   if (rejected.length) fail(`rejected candidates:\n  - ${rejected.join("\n  - ")}`);
 }
