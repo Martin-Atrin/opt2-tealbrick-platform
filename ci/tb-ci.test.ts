@@ -1,20 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  addPnpmIntegrity,
   belowMinimum,
   channelForVersion,
   checkDependencies,
   checkPackageJson,
   checkServiceImages,
+  dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
   type IndexRelease,
   lockfileTarballs,
   mergeIndex,
   newId,
+  packageManagerPinned,
   parsePackageTag,
   releaseUrl,
   renderImagesScript,
+  renderPushScript,
   sha512Integrity,
   skillsArchive,
   tarballName,
@@ -174,15 +178,18 @@ test("skills archive is sorted and complete", () => {
   assert.equal(skillsArchive({}, () => "").files.length, 0);
 });
 
-test("images script: no-push on check, guarded publish", () => {
+test("images script (C62): builds without credentials, tar on tags, never pushes", () => {
   const none = renderImagesScript(validateConfig({ kind: "library" }, repo), repo);
   assert.match(none, /nothing to build/);
   const cfg = validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app", manifest: "m.json" }] }, repo);
   const s = renderImagesScript(cfg, repo);
   assert.match(s, /--no-push/);
-  assert.match(s, /ghcr_token is missing/);
-  assert.match(s, new RegExp(`ghcr.io/martin-atrin/${repo}:\\$version`));
-  assert.ok(!s.includes('echo "$GHCR_TOKEN'), "token must never be echoed");
+  assert.match(s, new RegExp(`--tar-path "\\$CI_WORKSPACE/.tb-ci/images/${repo}.tar"`));
+  assert.match(s, /org.opencontainers.image.revision=\$CI_COMMIT_SHA/);
+  assert.ok(
+    !/GHCR_TOKEN|config\.json|--destination[^\n]*sha-/.test(s.replace(/--destination "[^"]*:\$version"/g, "")),
+    "no credentials and no push in the kaniko script",
+  );
 });
 
 test("dependency rules: v1 names rejected, @opt2-tealbrick only via workspace or release URL", () => {
@@ -326,4 +333,38 @@ test("SEC-03: image provenance check binds image to repo + commit", async () => 
   );
   assert.match(String(await verifyImageProvenance(ref, "Martin-Atrin/opt2-tealbrick-connect", commit, fake(good))), /does not belong/);
   assert.match(String(await verifyImageProvenance("ghcr.io/evil/x@sha256:1", `Martin-Atrin/${repo}`, commit, fake(good))), /bad image ref/);
+});
+
+test("C62: pnpm lockfile integrity is written into tarball resolutions", () => {
+  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
+  const lock = `  '@opt2-tealbrick/manifest@${url}':\n    resolution: {tarball: ${url}}\n  ajv@8.17.1:\n    resolution: {integrity: sha512-abc}\n`;
+  const { text, changed } = addPnpmIntegrity(lock, () => "sha512-XYZ=");
+  assert.equal(changed, 1);
+  assert.match(text, new RegExp(`resolution: \\{integrity: sha512-XYZ=, tarball: ${url.replaceAll(".", "\\.")}\\}`));
+  assert.deepEqual(lockfileTarballs(text, "pnpm"), [{ url, integrity: "sha512-XYZ=" }]);
+  assert.equal(addPnpmIntegrity(text, () => "x").changed, 0, "idempotent");
+});
+
+test("C62: packageManager must be hash-pinned", () => {
+  assert.equal(packageManagerPinned(`pnpm@9.15.4+sha512.${"a".repeat(128)}`), true);
+  assert.equal(packageManagerPinned("pnpm@9.15.4"), false);
+  assert.equal(packageManagerPinned(`pnpm@9.15.4+sha256.${"a".repeat(64)}`), false);
+});
+
+test("C62: Dockerfile installs must be frozen and script-free", () => {
+  assert.deepEqual(dockerfileInstallProblems("FROM node\nRUN corepack enable && pnpm install --frozen-lockfile --ignore-scripts\n"), []);
+  assert.deepEqual(dockerfileInstallProblems("FROM node\nRUN npm ci --ignore-scripts --omit=dev\n"), []);
+  assert.match(dockerfileInstallProblems("FROM node\nRUN pnpm install --frozen-lockfile\n").join(), /line 2: pnpm install without --ignore-scripts/);
+  assert.match(dockerfileInstallProblems("FROM node\nRUN pnpm install \\\n  --ignore-scripts\n").join(), /line 2: pnpm install without --frozen-lockfile/);
+  assert.match(dockerfileInstallProblems("FROM node\nRUN npm install express\n").join(), /npm install in an image build/);
+  assert.match(dockerfileInstallProblems("FROM node\nRUN npm ci\n").join(), /npm ci without --ignore-scripts/);
+  assert.deepEqual(dockerfileInstallProblems("FROM node\n# RUN npm install x\nRUN echo pnpm\n"), []);
+});
+
+test("C62: push script uses stdin for the token and only pushes this repo's images", () => {
+  const s = renderPushScript();
+  assert.match(s, /--password-stdin/);
+  assert.match(s, /unset GHCR_TOKEN/);
+  assert.match(s, /case "\$name" in "\$CI_REPO_NAME"\|"\$CI_REPO_NAME"-\*\)/);
+  assert.ok(!/-p "\$GHCR_TOKEN"/.test(s));
 });

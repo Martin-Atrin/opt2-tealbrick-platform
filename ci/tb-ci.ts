@@ -5,13 +5,13 @@
 //   install                     install dependencies per project path (frozen lockfile)
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
 //   gen                         BSA-03: committed gen/ not stale, `gen` script produces every tb-gen kind, tb-gen check passes
-//   kit-release                 (tag v*, miniapp) tb-gen kit --build -> kit tarball + sha256 on the GitHub release
+//   kit-build / kit-upload      (tag v*, miniapp) build the kit without tokens / upload it from a hash-checked runner
 //   audit-templates             (platform cron) every opt2 repo's template ref >= ci/MIN_TEMPLATE
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
-//   release-record              (tag v*) release candidate (image digests) -> GitHub release asset; NO signing key (SEC-03)
+//   release-record              (tag v*) validate + print the release; no token, no key (C62); the platform signer indexes it
 //   registry-sync               (platform signer pipeline only) verify candidates independently, index + sign
 //   pin-tarballs [<repoDir>]    (local) pin sha512 of GitHub-release tarballs the lockfile has no integrity for (S3)
-//   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
+//   package-pack / -upload      (tag <pkg>-v*) npm pack --ignore-scripts without tokens / upload from a hash-checked runner
 //   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
 //   registry-add-source ...     (C29 interim) dev entry built from source at a pushed commit
@@ -537,20 +537,29 @@ export function sha512Integrity(data: Uint8Array): string {
   return `sha512-${createHash("sha512").update(data).digest("base64")}`;
 }
 
-/** Returns problems: every release tarball needs integrity in the lockfile or a matching pin in tealbrick-integrity.json. */
+/** C62/BSD-10: write `integrity` into every pnpm `resolution: {tarball: …}` for a GitHub-release tarball. Pure. */
+export function addPnpmIntegrity(lockText: string, integrityOf: (url: string) => string): { text: string; changed: number } {
+  let changed = 0;
+  const text = lockText.replace(/resolution:\s*\{tarball:\s*(https:\/\/github\.com\/[^\s,}]+\/releases\/download\/[^\s,}]+\.tgz)\s*\}/g, (_m, url: string) => {
+    changed++;
+    return `resolution: {integrity: ${integrityOf(url)}, tarball: ${url}}`;
+  });
+  return { text, changed };
+}
+
+/** Returns problems: every GitHub-release tarball needs `integrity` IN THE LOCKFILE (pnpm and npm verify it on every install,
+ *  also inside Docker builds) and that integrity must equal the published tarball. */
 async function checkTarballIntegrity(dir: string, where: string): Promise<string[]> {
   const pm = packageManager(dir);
   if (!pm) return [];
-  const lockText = readFileSync(join(dir, pm === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json"), "utf8");
-  const entries = lockfileTarballs(lockText, pm);
-  const pinsPath = join(dir, INTEGRITY_FILE);
-  const pins = existsSync(pinsPath) ? (JSON.parse(readFileSync(pinsPath, "utf8")) as Record<string, string>) : {};
+  const lockName = pm === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json";
+  const entries = lockfileTarballs(readFileSync(join(dir, lockName), "utf8"), pm);
   const errs: string[] = [];
+  if (existsSync(join(dir, INTEGRITY_FILE)))
+    errs.push(`${where}: ${INTEGRITY_FILE} is retired (C62): run node ci/tb-ci.ts pin-tarballs, which writes integrity into ${lockName}, then delete it`);
   for (const e of entries) {
-    if (e.integrity) continue; // the package manager verifies it on install
-    const pin = pins[e.url];
-    if (!pin) {
-      errs.push(`${where}: ${e.url} has no integrity in the lockfile and no pin in ${INTEGRITY_FILE} (run: node ci/tb-ci.ts pin-tarballs <repo>)`);
+    if (!e.integrity) {
+      errs.push(`${where}: ${e.url} has no integrity in ${lockName} (run: node ci/tb-ci.ts pin-tarballs ../<repo>)`);
       continue;
     }
     const res = await fetch(e.url, { redirect: "follow" });
@@ -558,32 +567,71 @@ async function checkTarballIntegrity(dir: string, where: string): Promise<string
       errs.push(`${where}: ${e.url} HTTP ${res.status}`);
       continue;
     }
-    const got = sha512Integrity(new Uint8Array(await res.arrayBuffer()));
-    if (got !== pin) errs.push(`${where}: ${e.url} does not match its pinned integrity (tarball changed after pinning)`);
+    if (sha512Integrity(new Uint8Array(await res.arrayBuffer())) !== e.integrity) errs.push(`${where}: ${e.url} does not match the integrity in ${lockName}`);
   }
-  for (const url of Object.keys(pins)) if (!entries.some((e) => e.url === url)) errs.push(`${where}: stale pin ${url} (not in the lockfile)`);
   return errs;
 }
 
-/** (local) write tealbrick-integrity.json for every release tarball the lockfile does not already carry integrity for. */
+/** (local) C62: write sha512 integrity into pnpm-lock.yaml for every GitHub-release tarball (npm lockfiles already carry it). */
 async function cmdPinTarballs(args: string[]): Promise<void> {
   const dir = resolve(args[0] ?? ".");
   const pm = packageManager(dir);
   if (!pm) fail(`${dir}: no lockfile`);
-  const entries = lockfileTarballs(readFileSync(join(dir, pm === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json"), "utf8"), pm).filter((e) => !e.integrity);
-  const pins: Record<string, string> = {};
-  for (const e of entries.sort((a, b) => a.url.localeCompare(b.url))) {
-    const res = await fetch(e.url, { redirect: "follow" });
-    if (!res.ok) fail(`${e.url}: HTTP ${res.status}`);
-    pins[e.url] = sha512Integrity(new Uint8Array(await res.arrayBuffer()));
-  }
-  if (entries.length === 0) {
-    rmSync(join(dir, INTEGRITY_FILE), { force: true });
-    log("lockfile carries integrity for every release tarball; no pin file needed");
+  rmSync(join(dir, INTEGRITY_FILE), { force: true });
+  if (pm === "npm") {
+    const missing = lockfileTarballs(readFileSync(join(dir, "package-lock.json"), "utf8"), "npm").filter((e) => !e.integrity);
+    if (missing.length) fail(`package-lock.json lacks integrity for ${missing.map((e) => e.url).join(", ")}; run npm install to refresh it`);
+    log("package-lock.json carries integrity for every release tarball");
     return;
   }
-  writeFileSync(join(dir, INTEGRITY_FILE), `${JSON.stringify(pins, null, 2)}\n`);
-  log(`pinned ${entries.length} release tarball(s) in ${INTEGRITY_FILE}; commit it`);
+  const lockPath = join(dir, "pnpm-lock.yaml");
+  const lock = readFileSync(lockPath, "utf8");
+  const urls = [
+    ...new Set(
+      lockfileTarballs(lock, "pnpm")
+        .filter((e) => !e.integrity)
+        .map((e) => e.url),
+    ),
+  ];
+  const sums = new Map<string, string>();
+  for (const url of urls) {
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) fail(`${url}: HTTP ${res.status}`);
+    sums.set(url, sha512Integrity(new Uint8Array(await res.arrayBuffer())));
+  }
+  const { text, changed } = addPnpmIntegrity(lock, (u) => sums.get(u) as string);
+  writeFileSync(lockPath, text);
+  log(`wrote integrity for ${changed} tarball resolution(s) into pnpm-lock.yaml; run pnpm install --frozen-lockfile to confirm, then commit`);
+}
+
+/** C62: `packageManager` must pin pnpm by hash (corepack verifies it): pnpm@<semver>+sha512.<128 hex>. */
+export function packageManagerPinned(value: unknown): boolean {
+  return typeof value === "string" && /^pnpm@\d+\.\d+\.\d+\+sha512\.[0-9a-f]{128}$/.test(value);
+}
+
+/** C62: every install in a Dockerfile is frozen and runs no install scripts. Returns problems (line numbers are 1-based). */
+export function dockerfileInstallProblems(text: string): string[] {
+  const out: string[] = [];
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const start = i;
+    let instr = lines[i];
+    while (instr.trimEnd().endsWith("\\") && i + 1 < lines.length) instr = `${instr.trimEnd().slice(0, -1)} ${lines[++i]}`;
+    const t = instr.trim();
+    if (!/^RUN\s/i.test(t)) continue;
+    for (const cmd of t.slice(3).split(/&&|;|\|\|/)) {
+      const c = cmd.trim();
+      if (/(^|\s)(corepack\s+)?pnpm\s+(install|i|add)(\s|$)/.test(c)) {
+        if (!/--frozen-lockfile/.test(c)) out.push(`line ${start + 1}: pnpm install without --frozen-lockfile`);
+        if (!/--ignore-scripts/.test(c)) out.push(`line ${start + 1}: pnpm install without --ignore-scripts`);
+      } else if (/(^|\s)npm\s+(ci|install|i)(\s|$)/.test(c)) {
+        if (/npm\s+(install|i)(\s|$)/.test(c) && !/npm\s+(install|i)\s+-g\s/.test(c))
+          out.push(`line ${start + 1}: npm install in an image build (use npm ci --ignore-scripts)`);
+        if (!/--ignore-scripts/.test(c)) out.push(`line ${start + 1}: npm ${/npm\s+ci/.test(c) ? "ci" : "install"} without --ignore-scripts`);
+      }
+    }
+  }
+  return out;
 }
 
 /** C42: Railway refuses images with a `VOLUME` instruction (it mounts volumes itself). Returns offending line numbers. */
@@ -620,28 +668,23 @@ export function skillsArchive(manifest: { skills?: { id: string; file: string }[
   return { schema: "opt2.skills-archive/v1", files };
 }
 
+/** Kaniko step script (busybox sh). `check` builds without pushing; `tar` (tag events) builds each image to
+ *  .tb-ci/images/<name>.tar with OCI labels. It never sees a registry credential (C62): the push is a separate
+ *  step with an inline, template-owned script (crane), so Dockerfile RUN code can never read the token. */
 export function renderImagesScript(cfg: CiConfig, repoName: string): string {
   const lines = [
     "#!/bin/sh",
-    "# generated by tb-ci plan-images; runs in the kaniko debug image (busybox sh)",
+    "# generated by tb-ci plan-images; runs in the kaniko debug image (busybox sh); holds no credentials",
     "set -eu",
-    'mode="${1:?usage: images.sh check|publish}"',
-    'mkdir -p "$CI_WORKSPACE/.tb-ci/digests"',
+    'mode="${1:?usage: images.sh check|tar}"',
+    'mkdir -p "$CI_WORKSPACE/.tb-ci/images"',
   ];
   if (cfg.images.length === 0) {
     lines.push('echo "tb-ci: no images declared in tealbrick-ci.json; nothing to build"', "exit 0");
     return `${lines.join("\n")}\n`;
   }
   lines.push(
-    'if [ "$mode" = publish ]; then',
-    '  [ -n "${GHCR_TOKEN:-}" ] || { echo "tb-ci: FAIL: Woodpecker secret ghcr_token is missing"; exit 1; }',
-    '  [ -n "${CI_COMMIT_TAG:-}" ] || { echo "tb-ci: FAIL: publish runs on tag events only"; exit 1; }',
-    "  mkdir -p /kaniko/.docker",
-    `  auth="$(printf '%s:%s' '${OWNER}' "$GHCR_TOKEN" | base64 | tr -d '\\n')"`,
-    `  printf '{"auths":{"${REGISTRY_HOST}":{"auth":"%s"}}}\\n' "$auth" > /kaniko/.docker/config.json`,
-    "  unset auth GHCR_TOKEN",
-    '  version="${CI_COMMIT_TAG#v}"',
-    "fi",
+    'if [ "$mode" = tar ]; then [ -n "${CI_COMMIT_TAG:-}" ] || { echo "tb-ci: FAIL: tar mode runs on tag events only"; exit 1; }; version="${CI_COMMIT_TAG#v}"; fi',
   );
   for (const im of cfg.images) {
     const ctx = `"$CI_WORKSPACE/${im.context}"`;
@@ -649,13 +692,11 @@ export function renderImagesScript(cfg: CiConfig, repoName: string): string {
     const ref = `${IMAGE_NAMESPACE}/${im.name}`;
     lines.push(
       `echo "tb-ci: image ${im.name} ($mode)"`,
-      'if [ "$mode" = publish ]; then',
-      `  /kaniko/executor --context ${ctx} --dockerfile ${df} \\`,
-      `    --destination "${ref}:$version" --destination "${ref}:sha-$CI_COMMIT_SHA" \\`,
+      'if [ "$mode" = tar ]; then',
+      `  /kaniko/executor --no-push --context ${ctx} --dockerfile ${df} --destination "${ref}:$version" \\`,
       `    --label "org.opencontainers.image.source=https://github.com/${OWNER}/${repoName}" \\`,
       `    --label "org.opencontainers.image.revision=$CI_COMMIT_SHA" --label "org.opencontainers.image.version=$version" \\`,
-      `    --digest-file "$CI_WORKSPACE/.tb-ci/digests/${im.name}.digest" --cleanup --verbosity info`,
-      `  echo "tb-ci: pushed ${ref}@$(cat "$CI_WORKSPACE/.tb-ci/digests/${im.name}.digest")"`,
+      `    --tar-path "$CI_WORKSPACE/.tb-ci/images/${im.name}.tar" --cleanup --verbosity info`,
       "else",
       `  /kaniko/executor --no-push --context ${ctx} --dockerfile ${df} --cleanup --verbosity info`,
       "fi",
@@ -753,8 +794,8 @@ async function cmdSetup(): Promise<void> {
     }
     const pm = packageManager(join(root, p));
     if (!pm) errors.push(`${p}: a committed lockfile (pnpm-lock.yaml or package-lock.json) is required`);
-    if (pm === "pnpm" && typeof pkg.packageManager !== "string")
-      errors.push(`${p}/package.json: "packageManager": "pnpm@<version>" is required with pnpm-lock.yaml`);
+    if (pm === "pnpm" && !packageManagerPinned(pkg.packageManager))
+      errors.push(`${p}/package.json: "packageManager" must be "pnpm@<version>+sha512.<hex>" (C62; e.g. corepack use pnpm@9.15.4)`);
   }
   for (const im of cfg.images) {
     if (!existsSync(join(root, im.dockerfile))) errors.push(`image ${im.name}: ${im.dockerfile} not found`);
@@ -793,8 +834,8 @@ function cmdInstall(): void {
   for (const p of paths) {
     const dir = join(root, p);
     const pm = packageManager(dir);
-    if (pm === "pnpm") sh("corepack", ["pnpm", "install", "--frozen-lockfile"], dir);
-    else if (pm === "npm") sh("npm", ["ci"], dir);
+    if (pm === "pnpm") sh("corepack", ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"], dir);
+    else if (pm === "npm") sh("npm", ["ci", "--ignore-scripts"], dir);
     else fail(`${p}: no lockfile`);
   }
 }
@@ -856,36 +897,55 @@ function cmdGen(): void {
   }
 }
 
-/** BSA-03 on v* tags: build the per-app kit and attach tarball + sha256 to the GitHub release. */
-async function cmdKitRelease(): Promise<void> {
+/** BSA-03 on v* tags, step 1 (NO token): build the per-app kit into .tb-ci/kit. Runs repo dependency code (tb-gen). */
+function cmdKitBuild(): void {
   const root = repoRoot();
   const cfg = loadConfig(root);
-  const tag = process.env.CI_COMMIT_TAG;
-  if (!tag) fail("kit-release runs on tag events only");
   if (cfg.kind !== "miniapp") {
-    log("SKIP kit-release: not a miniapp");
+    log("SKIP kit-build: not a miniapp");
     return;
   }
-  const repo = repoName(root);
-  let version: string;
-  try {
-    version = versionFromTag(tag);
-  } catch (e) {
-    fail((e as Error).message);
-  }
-  const releaseId = await ensureRelease(repo, tag, channelForVersion(version) !== "stable");
+  if (process.env.GITHUB_TOKEN || process.env.GHCR_TOKEN) fail("C62: kit-build must run without tokens");
   for (const p of nodePaths(cfg, root)) {
-    const dir = join(root, p);
     const out = join(root, ".tb-ci/kit", p.replaceAll("/", "_"));
     mkdirSync(out, { recursive: true });
-    pmExec(dir, "tb-gen", ["kit", "--build", "--out", out]);
-    const tgz = readdirSync(out).filter((f) => f.endsWith(".tgz"));
-    if (tgz.length !== 1) fail(`${p}: expected one kit tarball in ${out}, found ${tgz.length}`);
-    const data = readFileSync(join(out, tgz[0]));
+    pmExec(join(root, p), "tb-gen", ["kit", "--build", "--out", out]);
+  }
+}
+
+/** Collects `<dir>/*.tgz` built by an earlier tokenless step: [file name, bytes]. Names are checked, content is the repo's own. */
+function builtTarballs(dir: string, nameRe: RegExp): [string, Buffer][] {
+  if (!existsSync(dir)) return [];
+  const out: [string, Buffer][] = [];
+  for (const sub of readdirSync(dir, { withFileTypes: true })) {
+    const files = sub.isDirectory() ? readdirSync(join(dir, sub.name)).map((f) => join(sub.name, f)) : [sub.name];
+    for (const rel of files) {
+      const name = rel.split("/").pop() as string;
+      if (!name.endsWith(".tgz")) continue;
+      if (!nameRe.test(name)) fail(`unexpected tarball name ${name}`);
+      out.push([name, readFileSync(join(dir, rel))]);
+    }
+  }
+  return out;
+}
+
+/** BSA-03 on v* tags, step 2 (token; the template runs this runner from a hash-checked copy, no repo code): upload kit tarballs. */
+async function cmdKitUpload(): Promise<void> {
+  const root = repoRoot();
+  const tag = process.env.CI_COMMIT_TAG;
+  if (!tag) fail("kit-upload runs on tag events only");
+  const repo = repoName(root);
+  const kits = builtTarballs(join(root, ".tb-ci/kit"), /^opt2-tealbrick-[a-z0-9-]+-kit-\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?\.tgz$/);
+  if (kits.length === 0) {
+    log("no kit tarballs (not a miniapp or nothing built)");
+    return;
+  }
+  const releaseId = await ensureRelease(repo, tag, channelForVersion(versionFromTag(tag)) !== "stable");
+  for (const [name, data] of kits) {
     const sha = createHash("sha256").update(data).digest("hex");
-    await uploadFile(repo, releaseId, tgz[0], data, "application/gzip");
-    await uploadFile(repo, releaseId, `${tgz[0]}.sha256`, Buffer.from(`${sha}  ${tgz[0]}\n`), "text/plain");
-    log(`kit ${tgz[0]} attached to ${tag} (sha256 ${sha})`);
+    await uploadFile(repo, releaseId, name, data, "application/gzip");
+    await uploadFile(repo, releaseId, `${name}.sha256`, Buffer.from(`${sha}  ${name}\n`), "text/plain");
+    log(`kit ${name} attached to ${tag} (sha256 ${sha})`);
   }
 }
 
@@ -902,6 +962,43 @@ async function cmdAuditTemplates(): Promise<void> {
   }
   if (bad.length) fail(`below minimum ${min}: ${bad.join(", ")}`);
   log(`all ${OPT2_REPOS.length} repos at or above ${min}`);
+}
+
+/** C62: the registry push runs in its own step from this template-owned script (crane image, busybox sh). Written by the
+ *  hash-checked runner right before the push step; no repo code runs in between. */
+export function renderPushScript(): string {
+  return [
+    "#!/bin/sh",
+    "# generated by the hash-checked tb-ci runner (push-script); pushes kaniko tarballs with crane",
+    "set -eu",
+    '[ -n "${GHCR_TOKEN:-}" ] || { echo "tb-ci: FAIL: Woodpecker secret ghcr_token is missing"; exit 1; }',
+    '[ -n "${CI_COMMIT_TAG:-}" ] || { echo "tb-ci: FAIL: push runs on tag events only"; exit 1; }',
+    'version="${CI_COMMIT_TAG#v}"',
+    `printf '%s' "$GHCR_TOKEN" | crane auth login ${REGISTRY_HOST} -u ${OWNER} --password-stdin >/dev/null`,
+    "unset GHCR_TOKEN",
+    'mkdir -p "$CI_WORKSPACE/.tb-ci/digests"',
+    "found=0",
+    'for t in "$CI_WORKSPACE"/.tb-ci/images/*.tar; do',
+    '  [ -e "$t" ] || continue',
+    "  found=1",
+    '  name="$(basename "$t" .tar)"',
+    '  case "$name" in "$CI_REPO_NAME"|"$CI_REPO_NAME"-*) ;; *) echo "tb-ci: FAIL: unexpected image tarball $name"; exit 1;; esac',
+    `  echo "$name" | grep -Eq '^[a-z0-9][a-z0-9-]*$' || { echo "tb-ci: FAIL: bad image name $name"; exit 1; }`,
+    `  ref="${IMAGE_NAMESPACE}/$name"`,
+    '  pushed="$(crane push "$t" "$ref:$version")"',
+    '  crane tag "$ref:$version" "sha-$CI_COMMIT_SHA" >/dev/null',
+    '  echo "${pushed#*@}" > "$CI_WORKSPACE/.tb-ci/digests/$name.digest"',
+    '  echo "tb-ci: pushed $pushed"',
+    "done",
+    '[ "$found" = 1 ] || echo "tb-ci: no image tarballs; nothing to push"',
+    "",
+  ].join("\n");
+}
+
+function cmdPushScript(out: string | undefined): void {
+  if (!out) fail("usage: push-script <path>");
+  writeFileSync(resolve(out), renderPushScript(), { mode: 0o755 });
+  log(`wrote ${out}`);
 }
 
 function cmdPlanImages(): void {
@@ -968,11 +1065,18 @@ async function loadManifestPkg(root: string): Promise<ManifestPkg> {
     entry = resolve(override);
   } else {
     const url = process.env.TB_MANIFEST_PKG;
+    const want = process.env.TB_MANIFEST_INTEGRITY;
     if (!url || !RELEASE_URL_RE.test(url)) fail("TB_MANIFEST_PKG must be the @opt2-tealbrick/manifest GitHub release tarball URL");
+    if (!want || !/^sha512-[A-Za-z0-9+/]+=*$/.test(want)) fail("TB_MANIFEST_INTEGRITY (sha512-…) is required with TB_MANIFEST_PKG (C62)");
+    const res = await fetch(url, { redirect: "follow" });
+    if (!res.ok) fail(`TB_MANIFEST_PKG: HTTP ${res.status}`);
+    const data = new Uint8Array(await res.arrayBuffer());
+    if (sha512Integrity(data) !== want) fail("TB_MANIFEST_PKG does not match TB_MANIFEST_INTEGRITY (C62): refusing to load it");
     const dir = join(root, ".tb-ci/pkgs");
     mkdirSync(dir, { recursive: true });
-    if (!existsSync(join(dir, "package.json"))) writeFileSync(join(dir, "package.json"), '{"private":true}\n');
-    sh("npm", ["install", "--no-save", "--no-audit", "--no-fund", url], dir);
+    writeFileSync(join(dir, "package.json"), '{"private":true}\n');
+    writeFileSync(join(dir, "manifest.tgz"), data);
+    sh("npm", ["install", "--no-save", "--no-audit", "--no-fund", "--ignore-scripts", "./manifest.tgz"], dir);
     const pkgDir = join(dir, "node_modules/@opt2-tealbrick/manifest");
     const pj = readJson(join(pkgDir, "package.json")) as { exports?: unknown; main?: string };
     const ex = pj.exports as Record<string, unknown> | string | undefined;
@@ -1089,17 +1193,16 @@ export interface ReleaseCandidateDoc {
   commit: string;
   candidates: ReleaseCandidate[];
 }
-export const CANDIDATE_ASSET = "release-candidate.json";
 
-/** Product tag pipeline: describe the release (image digests from image-publish) as a GitHub release asset. No signing key here. */
+/** Product tag pipeline (C62): validate the release locally and print it. No token, no signing key, no network writes.
+ *  The platform signer discovers the tag itself, resolves image digests from ghcr and re-derives everything. */
 async function cmdReleaseRecord(): Promise<void> {
   const root = repoRoot();
   const cfg = loadConfig(root);
-  const repo = repoName(root);
   const tag = process.env.CI_COMMIT_TAG;
-  const commit = process.env.CI_COMMIT_SHA;
-  if (!tag || !commit) fail("release-record runs on tag events only (CI_COMMIT_TAG, CI_COMMIT_SHA)");
-  if (process.env.RELEASE_SIGNING_KEY || process.env.RELEASE_SIGNING_KEY_FILE) fail("SEC-03: product pipelines must not hold the release signing key");
+  if (!tag) fail("release-record runs on tag events only");
+  for (const k of ["RELEASE_SIGNING_KEY", "RELEASE_SIGNING_KEY_FILE", "GITHUB_TOKEN", "GHCR_TOKEN"])
+    if (process.env[k]) fail(`C62/SEC-03: release-record must run without ${k}`);
   let version: string;
   try {
     version = versionFromTag(tag);
@@ -1108,18 +1211,11 @@ async function cmdReleaseRecord(): Promise<void> {
   }
   const entries = cfg.images.filter((im) => im.kind === "app" || im.kind === "bridge");
   if (entries.length === 0) {
-    log("no app/bridge images declared: no release candidate");
+    log("no app/bridge images declared: nothing for the release index");
     return;
   }
-  const m = await loadManifestPkg(root); // early validation only; the signer re-checks
-  const digestOf = (name: string): string => {
-    const f = join(root, ".tb-ci/digests", `${name}.digest`);
-    if (!existsSync(f)) fail(`digest for ${name} missing (image-publish must run first)`);
-    const d = readFileSync(f, "utf8").trim();
-    if (!/^sha256:[0-9a-f]{64}$/.test(d)) fail(`bad digest for ${name}`);
-    return d;
-  };
-  const candidates: ReleaseCandidate[] = entries.map((im) => {
+  const m = await loadManifestPkg(root);
+  for (const im of entries) {
     if (im.manifest) {
       const v = m.validateManifest(JSON.parse(readFileSync(join(root, im.manifest), "utf8")));
       if (!v.ok) fail(`${im.manifest} is invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
@@ -1127,27 +1223,33 @@ async function cmdReleaseRecord(): Promise<void> {
       if (man.id !== im.product || man.version !== version) fail(`manifest ${man.id}@${man.version} != ${im.product}@${version}`);
       const svcErrs = checkServiceImages(cfg, im.product, man.runtime?.services ?? []);
       if (svcErrs.length) fail(svcErrs.join("; "));
+      log(`candidate ${im.product}@${version}: manifestDigest ${m.manifestDigest(v.manifest)}`);
     }
-    const runtimeFile = im.kind === "bridge" ? `${dirname(im.dockerfile)}/bridge-runtime.json` : null;
-    if (runtimeFile) validateBridgeRuntime(JSON.parse(readFileSync(join(root, runtimeFile), "utf8")));
-    return {
-      product: im.product,
-      kind: im.kind === "bridge" ? "bridge" : "app",
-      version,
-      image: `${IMAGE_NAMESPACE}/${im.name}@${digestOf(im.name)}`,
-      services: cfg.images
-        .filter((x) => x.kind === "service" && x.product === im.product)
-        .map((x) => ({ id: x.service as string, image: `${IMAGE_NAMESPACE}/${x.name}@${digestOf(x.name)}` }))
-        .sort((x, y) => x.id.localeCompare(y.id)),
-      manifest: im.manifest ?? null,
-      runtimeFile,
-      upgradeFrom: im.upgradeFrom,
-    };
-  });
-  const doc: ReleaseCandidateDoc = { schema: "opt2.release-candidate/v1", repo: `${OWNER}/${repo}`, tag, commit, candidates };
-  const releaseId = await ensureRelease(repo, tag, channelForVersion(version) !== "stable");
-  await uploadAsset(repo, releaseId, CANDIDATE_ASSET, `${JSON.stringify(doc, null, 2)}\n`);
-  log(`release candidate for ${candidates.map((c) => `${c.product}@${c.version}`).join(", ")} attached; the platform signer verifies and indexes it`);
+    if (im.kind === "bridge") validateBridgeRuntime(JSON.parse(readFileSync(join(root, dirname(im.dockerfile), "bridge-runtime.json"), "utf8")));
+    const digest = existsSync(join(root, ".tb-ci/digests", `${im.name}.digest`))
+      ? readFileSync(join(root, ".tb-ci/digests", `${im.name}.digest`), "utf8").trim()
+      : "(see image-push)";
+    log(`candidate ${im.product}@${version} (${im.kind}) ${IMAGE_NAMESPACE}/${im.name}@${digest}; the platform signer verifies and indexes it`);
+  }
+}
+
+/** What the signer derives for one tag (SEC-03, C62): no product-written document is trusted. */
+export interface ReleaseCandidate {
+  product: string;
+  kind: "app" | "bridge";
+  version: string;
+  image: string; // ghcr.io/martin-atrin/<name>@sha256:<hex>
+  services: { id: string; image: string }[];
+  manifest: string | null;
+  runtimeFile: string | null;
+  upgradeFrom: string;
+}
+export interface ReleaseCandidateDoc {
+  schema: "opt2.release-candidate/v1";
+  repo: string;
+  tag: string;
+  commit: string;
+  candidates: ReleaseCandidate[];
 }
 
 // ---------- platform signer (SEC-03): runs only platform code, never product repo or dependency code ----------
@@ -1273,8 +1375,52 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
   }
 }
 
+/** Resolves a public ghcr tag to its manifest digest (null = not published yet). */
+export async function ghcrDigest(name: string, tag: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+  const tok = await fetcher(`https://ghcr.io/token?scope=repository:martin-atrin/${name}:pull`);
+  if (!tok.ok) return null;
+  const token = ((await tok.json()) as { token: string }).token;
+  const res = await fetcher(`https://ghcr.io/v2/martin-atrin/${name}/manifests/${tag}`, {
+    method: "HEAD",
+    headers: { authorization: `Bearer ${token}`, accept: GHCR_ACCEPT },
+  });
+  if (!res.ok) return null;
+  const d = res.headers.get("docker-content-digest");
+  return d && /^sha256:[0-9a-f]{64}$/.test(d) ? d : null;
+}
+
+/** Builds the candidate for one product tag from the repo at that commit + ghcr; null = images not published (pending). */
+async function candidateFromTag(repo: string, tag: string, commit: string): Promise<ReleaseCandidateDoc | null> {
+  const version = versionFromTag(tag);
+  const cfgText = await rawAt(`${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
+  if (!cfgText) return null;
+  const cfg = validateConfig(JSON.parse(cfgText), repo);
+  const candidates: ReleaseCandidate[] = [];
+  for (const im of cfg.images.filter((x) => x.kind === "app" || x.kind === "bridge")) {
+    const d = await ghcrDigest(im.name, version);
+    if (!d) return null;
+    const services: { id: string; image: string }[] = [];
+    for (const sv of cfg.images.filter((x) => x.kind === "service" && x.product === im.product)) {
+      const sd = await ghcrDigest(sv.name, version);
+      if (!sd) return null;
+      services.push({ id: sv.service as string, image: `${IMAGE_NAMESPACE}/${sv.name}@${sd}` });
+    }
+    candidates.push({
+      product: im.product,
+      kind: im.kind === "bridge" ? "bridge" : "app",
+      version,
+      image: `${IMAGE_NAMESPACE}/${im.name}@${d}`,
+      services: services.sort((a, b) => a.id.localeCompare(b.id)),
+      manifest: im.manifest ?? null,
+      runtimeFile: im.kind === "bridge" ? `${dirname(im.dockerfile)}/bridge-runtime.json` : null,
+      upgradeFrom: im.upgradeFrom,
+    });
+  }
+  return candidates.length ? { schema: "opt2.release-candidate/v1", repo: `${OWNER}/${repo}`, tag, commit, candidates } : null;
+}
+
 /** Platform signer pipeline (cron/manual, platform repo only, holds release_signing_key):
- *  collect release candidates from the opt2 repos, verify each independently, add them, re-sign when anything changed. */
+ *  discover v* tags in the opt2 repos, derive and verify each release independently, add them, re-sign when anything changed. */
 async function cmdRegistrySync(): Promise<void> {
   const m = await loadManifestPkg(repoRoot());
   const cur = await ghFile(INDEX_PATH, "main");
@@ -1283,17 +1429,20 @@ async function cmdRegistrySync(): Promise<void> {
   const add: IndexRelease[] = [];
   const rejected: string[] = [];
   for (const repo of OPT2_REPOS) {
-    const rels = await gh("GET", `/repos/${OWNER}/${repo}/releases?per_page=30`);
-    for (const rel of (rels.json ?? []) as { tag_name: string; assets: { name: string; browser_download_url: string }[] }[]) {
-      const asset = rel.assets?.find((x) => x.name === CANDIDATE_ASSET);
-      if (!asset) continue;
-      const doc = (await (await fetch(asset.browser_download_url)).json()) as ReleaseCandidateDoc;
-      if (doc.schema !== "opt2.release-candidate/v1" || doc.repo !== `${OWNER}/${repo}` || doc.tag !== rel.tag_name) {
-        rejected.push(`${repo} ${rel.tag_name}: candidate document does not match its release`);
+    const tags = await gh("GET", `/repos/${OWNER}/${repo}/tags?per_page=50`);
+    for (const t of (tags.json ?? []) as { name: string; commit: { sha: string } }[]) {
+      if (!/^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t.name)) continue;
+      const version = t.name.slice(1);
+      let doc: ReleaseCandidateDoc | null;
+      try {
+        doc = await candidateFromTag(repo, t.name, t.commit.sha);
+      } catch (e) {
+        rejected.push(`${repo} ${t.name}: ${(e as Error).message}`);
         continue;
       }
+      if (!doc) continue; // no images for this tag (yet): pending, not an error
       for (const c of doc.candidates) {
-        if (known.has(`${c.product}@${c.version}@${channelForVersion(c.version)}`)) continue;
+        if (known.has(`${c.product}@${version}@${channelForVersion(version)}`)) continue;
         const r = await verifyCandidate(m, doc, c);
         if (typeof r === "string") rejected.push(`${repo} ${doc.tag} ${c.product}: ${r}`);
         else {
@@ -1490,7 +1639,9 @@ async function uploadFile(repo: string, releaseId: number, name: string, data: B
   if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
 }
 
-async function cmdPackageRelease(): Promise<void> {
+/** Package tags, step 1 (NO token): npm pack --ignore-scripts the tagged workspace package into .tb-ci/pack. */
+async function cmdPackagePack(): Promise<void> {
+  if (process.env.GITHUB_TOKEN || process.env.GHCR_TOKEN) fail("C62: package-pack must run without tokens");
   const root = repoRoot();
   const cfg = loadConfig(root);
   const repo = repoName(root);
@@ -1531,17 +1682,32 @@ async function cmdPackageRelease(): Promise<void> {
   mkdirSync(outDir, { recursive: true });
   try {
     writeFileSync(pjPath, `${JSON.stringify(pkg, null, 2)}\n`);
-    sh("npm", ["pack", "--pack-destination", outDir], target.abs);
+    sh("npm", ["pack", "--ignore-scripts", "--pack-destination", outDir], target.abs);
   } finally {
     writeFileSync(pjPath, original);
   }
-  const file = tarballName(target.name, target.version);
-  const data = readFileSync(join(outDir, file));
+  log(`packed ${tarballName(target.name, target.version)} (upload runs in the next step)`);
+}
+
+/** Package tags, step 2 (token; hash-checked runner, no repo code): upload the packed tarball + sha256. */
+async function cmdPackageUpload(): Promise<void> {
+  const root = repoRoot();
+  const repo = repoName(root);
+  const tag = process.env.CI_COMMIT_TAG;
+  if (!tag) fail("package-upload runs on tag events only");
+  if (repo === PLATFORM_REPO && tag.startsWith("ci-v")) {
+    log(`SKIP: ${tag} is a CI template tag, not a package release`);
+    return;
+  }
+  const { dir, version } = parsePackageTag(tag);
+  const packs = builtTarballs(join(root, ".tb-ci/pack"), /^[a-z0-9-]+-\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?\.tgz$/).filter(([n]) => n.endsWith(`-${version}.tgz`));
+  if (packs.length !== 1) fail(`expected exactly one packed tarball for ${dir}@${version}, found ${packs.length}`);
+  const [file, data] = packs[0];
   const sha = createHash("sha256").update(data).digest("hex");
-  const releaseId = await ensureRelease(repo, tag, channelForVersion(target.version) !== "stable");
+  const releaseId = await ensureRelease(repo, tag, channelForVersion(version) !== "stable");
   await uploadFile(repo, releaseId, file, data, "application/gzip");
   await uploadFile(repo, releaseId, `${file}.sha256`, Buffer.from(`${sha}  ${file}\n`), "text/plain");
-  log(`released ${target.name}@${target.version}: ${releaseUrl(repo, target.dir, target.name, target.version)} (sha256 ${sha})`);
+  log(`released ${file} on ${tag} (sha256 ${sha})`);
 }
 
 function cmdAdopt(args: string[]): void {
@@ -1582,7 +1748,7 @@ function cmdStamp(): void {
     .update(readFileSync(join(here, "tb-ci.ts")))
     .digest("hex");
   const tplPath = join(here, "woodpecker/ci.yaml");
-  const tpl = readFileSync(tplPath, "utf8").replace(/TB_CI_SHA256: "[^"]*"/, `TB_CI_SHA256: "${sha}"`);
+  const tpl = readFileSync(tplPath, "utf8").replaceAll(/TB_CI_SHA256: "[^"]*"/g, `TB_CI_SHA256: "${sha}"`);
   writeFileSync(tplPath, tpl);
   writeFileSync(join(here, "../.woodpecker/ci.yaml"), tpl);
   log(`stamped runner sha256 ${sha}`);
@@ -1599,16 +1765,22 @@ async function main(argv: string[]): Promise<void> {
       return cmdRun(rest[0]);
     case "gen":
       return cmdGen();
-    case "kit-release":
-      return cmdKitRelease();
+    case "push-script":
+      return cmdPushScript(rest[0]);
+    case "kit-build":
+      return cmdKitBuild();
+    case "kit-upload":
+      return cmdKitUpload();
     case "audit-templates":
       return cmdAuditTemplates();
     case "plan-images":
       return cmdPlanImages();
     case "release-record":
       return cmdReleaseRecord();
-    case "package-release":
-      return cmdPackageRelease();
+    case "package-pack":
+      return cmdPackagePack();
+    case "package-upload":
+      return cmdPackageUpload();
     case "adopt":
       return cmdAdopt(rest);
     case "stamp":
@@ -1625,7 +1797,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|kit-release|audit-templates|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|kit-build|kit-upload|audit-templates|push-script|plan-images|release-record|package-pack|package-upload|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
       );
   }
 }

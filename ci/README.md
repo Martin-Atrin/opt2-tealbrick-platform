@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v7)
+# opt2 CI standard (template ci-v8)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -22,23 +22,27 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
-| image-publish | tag `v*` only: push `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>` | build/push fails, `ghcr_token` missing |
-| release-record | tag `v*` only: attaches `release-candidate.json` (product, version, image + service image digests, manifest/runtime paths) to the GitHub release. It holds NO signing key (SEC-03) | invalid manifest, version mismatch, service images ≠ manifest services, a signing key present in the environment |
-| kit-release | tag `v*`, kind miniapp: `tb-gen kit --build` → `<product>-kit-<ver>.tgz` + `.sha256` attached to the GitHub release (BSA-03) | kit build fails, `ghcr_token` missing |
-| package-release | tag `<package>-v<semver>` only: `npm pack` of `packages/<package>` -> tarball + `.sha256` on the GitHub release | version mismatch, an in-repo dependency not released yet |
+| image-build | tag `v*`: kaniko builds each image to `.tb-ci/images/<name>.tar` with OCI labels (source, revision, version). No credentials (C62) | build fails |
+| push-prepare | tag `v*`: hash-checked runner (copied to /tmp) writes `.tb-ci/push.sh` | runner hash mismatch |
+| image-push | tag `v*`: crane pushes the tarballs to `ghcr.io/martin-atrin/<name>:<version>` + `:sha-<commit>`; the only step with `ghcr_token` for images; token via stdin | push fails, `ghcr_token` missing, a tarball not named after this repo |
+| release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62) | invalid manifest, version mismatch, any token in the environment |
+| kit-build / kit-upload | tag `v*`, miniapp: `tb-gen kit --build` WITHOUT a token, then the hash-checked runner uploads `<product>-kit-<ver>.tgz` + `.sha256` (BSA-03, C62) | kit build fails, `ghcr_token` missing |
+| package-pack / package-upload | tag `<package>-v<semver>`: `npm pack --ignore-scripts` WITHOUT a token, then the hash-checked runner uploads the tarball + `.sha256` | version mismatch, an in-repo dependency not released yet |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
 
 ## Release signing (SEC-03, C59)
-Product pipelines never see the release signing key. The platform repo's `registry-sync` pipeline (Woodpecker cron, every 15 min, plus manual) is the only CI job that holds `release_signing_key` (a platform-repo secret, events cron/manual). It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). For each new `release-candidate.json` it:
+Product pipelines never see the release signing key and no longer write anything for the index. The platform repo's `registry-sync` pipeline (Woodpecker cron, every 15 min, plus manual) is the only CI job that holds `release_signing_key` (a platform-repo secret, events cron/manual). It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). It discovers new `v*` tags in the opt2 repos, reads `tealbrick-ci.json` at the tag commit and resolves each declared image's `:<version>` digest in ghcr (tags without published images stay pending). For each release it:
 1. checks the tag points at the candidate's commit;
 2. re-reads the manifest, skill files and bridge runtime from the repo AT that commit (as data) and re-derives `manifestDigest`, `skillsDigest`, the runtime record;
 3. checks the service images equal the manifest services that have `build`;
 4. checks every image digest exists in ghcr and its OCI labels say `revision = <commit>` and `source = https://github.com/<repo>`;
 5. then adds the entry and signs the index. Any rejected candidate turns the pipeline red with the reason.
 
-## Dependency integrity (S3, C59)
-Every GitHub-release tarball in a lockfile needs integrity: npm lockfiles carry it themselves; pnpm lockfiles do not record it for URL tarballs, so such repos commit `tealbrick-integrity.json` (`{url: "sha512-…"}`), written by `node ci/tb-ci.ts pin-tarballs ../opt2-tealbrick-<name>` after each dependency change. Setup downloads each pinned tarball and fails on a missing pin, a mismatch or a stale pin.
+## Dependency integrity (S3/C59, C62/BSD-10)
+- Every GitHub-release tarball in a lockfile carries `integrity` IN THE LOCKFILE, so pnpm/npm verify it on every install, also inside Docker builds. npm lockfiles have it; for pnpm run `node ci/tb-ci.ts pin-tarballs ../opt2-tealbrick-<name>` after each dependency change: it writes `resolution: {integrity: sha512-…, tarball: …}` into `pnpm-lock.yaml` (pnpm keeps it and fails with ERR_PNPM_TARBALL_INTEGRITY on a mismatch). Setup downloads each tarball and fails if integrity is missing or wrong. `tealbrick-integrity.json` is retired.
+- `packageManager` is hash-pinned: `"pnpm@<version>+sha512.<hex>"` (corepack verifies the pnpm download). `corepack use pnpm@9.15.4` writes it.
+- Installs never run install scripts: CI uses `pnpm install --frozen-lockfile --ignore-scripts` / `npm ci --ignore-scripts`; setup fails on any Dockerfile `RUN` with `pnpm install` lacking `--frozen-lockfile` or `--ignore-scripts`, or `npm ci` lacking `--ignore-scripts`, or `npm install`.
 
 ## Package rules (enforced by setup)
 - Every `package.json` (root and workspace packages) has `"private": true` and no `publishConfig` (no npm publishing in opt2).
