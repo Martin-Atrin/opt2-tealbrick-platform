@@ -372,6 +372,9 @@ export function checkPackageJson(pkg: Record<string, unknown>, cfg: CiConfig, wh
 
 export const RELEASE_URL_RE =
   /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
+/** ci-v9.3: the exact spec tarball the manifest package is loaded with (pinned by sha512 next to it). */
+const SPEC_URL_RE =
+  /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-specs\/releases\/download\/spec-v\d+\.\d+\.\d+\/opt2-tealbrick-spec-\d+\.\d+\.\d+\.tgz$/;
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
 
 /** Dependency rules: no v1 names; @opt2-tealbrick/* only as workspace (same repo) or GitHub release tarball URL. Returns [errors, urls]. */
@@ -531,10 +534,10 @@ export function checkPackedTarball(tgz: Uint8Array): string[] {
   return missingPackTargets(pkg, entries.keys()).map((t) => `${String(pkg.name)}: ${t} is referenced by package.json but missing from the tarball`);
 }
 
-/** ci-v9.1: the unit step talks to the opt-in Postgres step (Woodpecker detached step `postgres`) only when tealbrick-ci.json asks. */
+/** ci-v9.1: the unit step talks to the opt-in Postgres step (Woodpecker step `postgres`) only when tealbrick-ci.json asks. */
 export const PG_TEST_URL = "postgres://tb:tb-ci-only@postgres:5432/tb";
 export const PG_MARKER = ".tb-ci/postgres";
-/** ci-v9.2: written when the unit step ends (pass or fail); the template's postgres step then stops itself and exits 0. */
+/** ci-v9.2: written when the unit step ends (pass or fail); the template's postgres step then stops itself and exits 0. ci-v9.3: the step is a normal parallel step (a detached one ends red). */
 export const PG_DONE_MARKER = ".tb-ci/postgres-done";
 export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out = { ...env };
@@ -893,7 +896,7 @@ async function cmdSetup(): Promise<void> {
   log(
     `kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} postgres=${cfg.postgres} images=${cfg.images.map((i) => i.name).join(",") || "-"}`,
   );
-  // ci-v9.1: the template's detached `postgres` step starts the database only when this marker exists (opt-in)
+  // ci-v9.1: the template's `postgres` step starts the database only when this marker exists (opt-in)
   mkdirSync(join(root, ".tb-ci"), { recursive: true });
   if (cfg.postgres) writeFileSync(join(root, PG_MARKER), "requested by tealbrick-ci.json\n");
   else rmSync(join(root, PG_MARKER), { force: true });
@@ -999,7 +1002,7 @@ async function cmdRun(script: string | undefined): Promise<void> {
     return;
   }
   if (script === "test" && cfg.postgres) {
-    // ci-v9.2: tell the detached postgres step to stop itself, however this process ends (pass, fail, process.exit, throw)
+    // ci-v9.2: tell the postgres step to stop itself, however this process ends (pass, fail, process.exit, throw)
     process.on("exit", () => {
       try {
         writeFileSync(join(root, PG_DONE_MARKER), "unit step finished\n");
@@ -1282,6 +1285,16 @@ async function uploadAsset(repo: string, releaseId: number, name: string, data: 
   if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
 }
 
+/** ci-v9.3: the lockfile npm wrote for the release-record packages must hold exactly the pinned integrity of both tarballs. */
+export function lockPinProblems(lock: { packages?: Record<string, { integrity?: string }> }, pins: { manifest: string; spec: string }): string[] {
+  const out: string[] = [];
+  if (lock.packages?.["node_modules/@opt2-tealbrick/manifest"]?.integrity !== pins.manifest)
+    out.push("installed @opt2-tealbrick/manifest differs from TB_MANIFEST_INTEGRITY (C62)");
+  if (lock.packages?.["node_modules/@opt2-tealbrick/spec"]?.integrity !== pins.spec)
+    out.push("installed @opt2-tealbrick/spec differs from TB_SPEC_INTEGRITY (ci-v9.3)");
+  return out;
+}
+
 async function loadManifestPkg(root: string): Promise<ManifestPkg> {
   const override = process.env.TB_MANIFEST_MODULE; // local path to a built package (development)
   let entry: string;
@@ -1296,11 +1309,27 @@ async function loadManifestPkg(root: string): Promise<ManifestPkg> {
     if (!res.ok) fail(`TB_MANIFEST_PKG: HTTP ${res.status}`);
     const data = new Uint8Array(await res.arrayBuffer());
     if (sha512Integrity(data) !== want) fail("TB_MANIFEST_PKG does not match TB_MANIFEST_INTEGRITY (C62): refusing to load it");
+    // ci-v9.3: the manifest package depends on @opt2-tealbrick/spec by a GitHub URL, which npm would fetch WITHOUT integrity.
+    // The spec tarball is pinned here the same way (sha512 checked before install) and an npm override makes the manifest
+    // package use exactly that file. The lockfile npm writes is read back, so a different spec or manifest can never load.
+    const specUrl = process.env.TB_SPEC_PKG;
+    const specWant = process.env.TB_SPEC_INTEGRITY;
+    if (!specUrl || !SPEC_URL_RE.test(specUrl)) fail("TB_SPEC_PKG must be the @opt2-tealbrick/spec GitHub release tarball URL (ci-v9.3)");
+    if (!specWant || !/^sha512-[A-Za-z0-9+/]+=*$/.test(specWant)) fail("TB_SPEC_INTEGRITY (sha512-…) is required with TB_SPEC_PKG (ci-v9.3)");
+    const specRes = await fetch(specUrl, { redirect: "follow" });
+    if (!specRes.ok) fail(`TB_SPEC_PKG: HTTP ${specRes.status}`);
+    const specData = new Uint8Array(await specRes.arrayBuffer());
+    if (sha512Integrity(specData) !== specWant) fail("TB_SPEC_PKG does not match TB_SPEC_INTEGRITY (ci-v9.3): refusing to load it");
     const dir = join(root, ".tb-ci/pkgs");
+    rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "package.json"), '{"private":true}\n');
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ private: true, overrides: { "@opt2-tealbrick/spec": "file:./spec.tgz" } }) + "\n");
     writeFileSync(join(dir, "manifest.tgz"), data);
-    sh("npm", ["install", "--no-save", "--no-audit", "--no-fund", "--ignore-scripts", "./manifest.tgz"], dir);
+    writeFileSync(join(dir, "spec.tgz"), specData);
+    sh("npm", ["install", "--no-audit", "--no-fund", "--ignore-scripts", "./manifest.tgz"], dir);
+    const lock = readJson(join(dir, "package-lock.json")) as { packages?: Record<string, { integrity?: string }> };
+    const problems = lockPinProblems(lock, { manifest: want, spec: specWant });
+    if (problems.length > 0) fail(`${problems.join("; ")}: refusing to load it`);
     const pkgDir = join(dir, "node_modules/@opt2-tealbrick/manifest");
     const pj = readJson(join(pkgDir, "package.json")) as { exports?: unknown; main?: string };
     const ex = pj.exports as Record<string, unknown> | string | undefined;

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
   expectedGenFiles,
   type IndexRelease,
   lockfileTarballs,
+  lockPinProblems,
   mergeIndex,
   missingPackTargets,
   newId,
@@ -477,7 +478,7 @@ test("ci-v9.1 postgres is opt-in: config, unit env and template", () => {
   assert.doesNotMatch(tpl, /^services:/m, "no always-on service (it showed a red step on green pipelines)");
   assert.doesNotMatch(tpl, /TB_TEST_DATABASE_URL:/, "the runner sets the URL only when opted in");
   const step = /- name: postgres\n([\s\S]*?)\n\n/.exec(tpl)?.[1] ?? "";
-  assert.match(step, /detach: true/);
+  assert.doesNotMatch(step, /detach:/, "ci-v9.3: a detached step ends red on this Woodpecker");
   assert.ok(step.includes(`if [ ! -f ${PG_MARKER} ]; then`) && step.includes("exit 0"), "skips (green) unless setup wrote the marker");
   assert.ok(tpl.indexOf("- name: setup") < tpl.indexOf("- name: postgres"), "postgres starts after setup decided");
 });
@@ -584,4 +585,115 @@ test("ci-v9.2 postgres step stops itself: marker, TERM then KILL, exit 0", async
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
+});
+
+// ---------- ci-v9.3 ----------
+
+/** Steps of the template with their depends_on, read from the YAML text (the template is flat on purpose). */
+function templateGraph(tpl: string): Map<string, { deps: string[]; detach: boolean; when: string }> {
+  const out = new Map<string, { deps: string[]; detach: boolean; when: string }>();
+  for (const block of tpl.split(/\n {2}- name: /).slice(1)) {
+    const name = /^([a-z-]+)/.exec(block)?.[1] ?? "";
+    const deps = /\n {4}depends_on: \[([^\]]*)\]/.exec(block)?.[1];
+    assert.notEqual(deps, undefined, `step ${name} has depends_on (DAG mode needs it on every step)`);
+    out.set(name, {
+      deps: (deps ?? "")
+        .split(",")
+        .map((d) => d.trim())
+        .filter(Boolean),
+      detach: /\n {4}detach:/.test(block),
+      when: /\n {4}when:\n([\s\S]*)$/.exec(block)?.[1] ?? "",
+    });
+  }
+  return out;
+}
+
+test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keeps the old order", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const g = templateGraph(tpl);
+  assert.deepEqual(
+    [...g.keys()],
+    [
+      "secret-scan",
+      "setup",
+      "postgres",
+      "postgres-stop",
+      "install",
+      "typecheck",
+      "lint",
+      "unit",
+      "conformance",
+      "build",
+      "gen",
+      "image-check",
+      "release-record",
+    ],
+  );
+  for (const [name, s] of g) {
+    assert.equal(s.detach, false, `${name}: no detached steps (they end red on this Woodpecker)`);
+    for (const d of s.deps) assert.ok(g.has(d), `${name} depends on unknown step ${d}`);
+  }
+  // acyclic: repeatedly remove steps whose dependencies are gone
+  const left = new Map([...g].map(([n, s]) => [n, new Set(s.deps)]));
+  for (let progressed = true; progressed && left.size > 0; ) {
+    progressed = false;
+    for (const [n, deps] of left) {
+      if ([...deps].every((d) => !left.has(d))) {
+        left.delete(n);
+        progressed = true;
+      }
+    }
+  }
+  assert.equal(left.size, 0, "the step graph has a cycle");
+  // the node chain is the old sequential order
+  const chain = ["secret-scan", "setup", "install", "typecheck", "lint", "unit", "conformance", "build", "gen"];
+  for (let i = 1; i < chain.length; i++) assert.deepEqual(g.get(chain[i] as string)?.deps, [chain[i - 1]], `${chain[i]} follows ${chain[i - 1]}`);
+  assert.deepEqual(g.get("secret-scan")?.deps, []);
+  // postgres runs beside the chain, never in it: nothing waits for it (it ends only after the unit step)
+  for (const [n, s] of g) assert.ok(!s.deps.includes("postgres"), `${n} must not wait for the postgres step`);
+  assert.deepEqual(g.get("postgres")?.deps, ["setup"], "starts after setup decided whether it is requested");
+  // a failed early step releases it at once
+  assert.deepEqual(g.get("postgres-stop")?.deps, ["install", "typecheck", "lint"]);
+  assert.match(g.get("postgres-stop")?.when ?? "", /status: \[failure\]/);
+  // the last two steps end the chain on tags / other events
+  assert.deepEqual(g.get("image-check")?.deps, ["gen"]);
+  assert.deepEqual(g.get("release-record")?.deps, ["gen"]);
+});
+
+test("ci-v9.3 postgres-stop writes the marker the postgres step waits for", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const script = stepScript(tpl, "postgres-stop");
+  assert.ok(script.includes(PG_DONE_MARKER), "writes the same marker the runner writes");
+  assert.ok(stepScript(tpl, "postgres").includes(PG_DONE_MARKER.replace(".tb-ci/", "")), "and the postgres step waits for it");
+  const work = mkdtempSync(join(tmpdir(), "tb-pg-stop-"));
+  try {
+    spawnSync("sh", ["-e", "-c", script], { cwd: work });
+    assert.equal(existsSync(join(work, PG_DONE_MARKER)), true);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile check fails closed", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const url = /TB_SPEC_PKG: (\S+)/.exec(tpl)?.[1] ?? "";
+  const integrity = /TB_SPEC_INTEGRITY: (\S+)/.exec(tpl)?.[1] ?? "";
+  assert.match(url, /opt2-tealbrick-specs\/releases\/download\/spec-v(\d+\.\d+\.\d+)\/opt2-tealbrick-spec-\1\.tgz$/);
+  assert.match(integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+  // the same spec the signer's lockfile holds (and the one the pinned manifest package asks for)
+  const lock = JSON.parse(readFileSync(new URL("../ops/signer/package-lock.json", import.meta.url), "utf8")) as {
+    packages: Record<string, { resolved?: string; integrity?: string }>;
+  };
+  const spec = lock.packages["node_modules/@opt2-tealbrick/spec"];
+  assert.equal(spec?.resolved, url);
+  assert.equal(spec?.integrity, integrity);
+  const manifest = /TB_MANIFEST_INTEGRITY: (\S+)/.exec(tpl)?.[1] ?? "";
+  const ok = { packages: { "node_modules/@opt2-tealbrick/manifest": { integrity: manifest }, "node_modules/@opt2-tealbrick/spec": { integrity } } };
+  assert.deepEqual(lockPinProblems(ok, { manifest, spec: integrity }), []);
+  const other = `sha512-${"A".repeat(86)}==`;
+  assert.equal(
+    lockPinProblems({ packages: { ...ok.packages, "node_modules/@opt2-tealbrick/spec": { integrity: other } } }, { manifest, spec: integrity }).length,
+    1,
+  );
+  assert.equal(lockPinProblems({ packages: {} }, { manifest, spec: integrity }).length, 2);
 });
