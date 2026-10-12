@@ -5,7 +5,7 @@
 # Clean-up: images are built by kaniko inside the step container (no host daemon images,
 # no host socket, no privileged step); Woodpecker removes step containers and the workspace.
 # ci-v9.3: the steps form an explicit graph (depends_on on every step), in the same order as before. Only the opt-in
-# postgres step runs beside install..gen instead of in front of them (see the postgres step).
+# postgres step runs beside the unit step instead of in front of it (see the postgres step).
 labels:
   platform: linux/amd64
 
@@ -37,48 +37,6 @@ steps:
       - echo "$TB_CI_SHA256  .tb-ci/tb-ci.ts" | sha256sum -c -
       - node .tb-ci/tb-ci.ts setup
 
-  # ci-v9.1: opt-in Postgres for tests. Starts only when tealbrick-ci.json has "postgres": true (setup writes
-  # .tb-ci/postgres); otherwise it exits 0 at once. The unit step then gets TB_TEST_DATABASE_URL; tests skip when it is unset.
-  # Ephemeral, no volume; removed with the pipeline.
-  # ci-v9.3: a NORMAL step (not detached) that runs in parallel with install..gen and stops ITSELF. Woodpecker 3.19 ends every
-  # detached step (and every service) red with "no such container" (exit 0) even when it stops cleanly, so ci-v9.1 and ci-v9.2
-  # still showed a red step. The same self-stopping script as a normal step ends green (portal-core's core-conformance workflow
-  # proved it). The runner writes .tb-ci/postgres-done when the unit step ends (pass, fail or crash); the step then shuts Postgres
-  # down (TERM, KILL after 10 s) and exits 0. If a step before unit fails, postgres-stop writes the marker, so the step does not
-  # wait for its 1 h cap. The wait/exit status is ignored only here, for the cleanup; a database that never came up still fails
-  # the unit step (waitForTcp).
-  - name: postgres
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-    depends_on: [setup]
-    environment:
-      POSTGRES_USER: tb
-      POSTGRES_PASSWORD: tb-ci-only
-      POSTGRES_DB: tb
-    commands:
-      - if [ ! -f .tb-ci/postgres ]; then echo "postgres not requested (tealbrick-ci.json postgres=false); skipped"; exit 0; fi
-      - DONE="$PWD/.tb-ci/postgres-done"
-      - cd /
-      - docker-entrypoint.sh postgres &
-      - PG=$!
-      - n=0
-      - while [ ! -f "$DONE" ] && kill -0 "$PG" 2>/dev/null && [ "$n" -lt 3600 ]; do n=$((n+1)); sleep 1; done
-      - echo "postgres cleanup (unit step done or cap reached after $n s)"
-      - kill -TERM "$PG" 2>/dev/null || true
-      - k=0; while kill -0 "$PG" 2>/dev/null && [ "$k" -lt 10 ]; do k=$((k+1)); sleep 1; done
-      - kill -KILL "$PG" 2>/dev/null || true
-      - wait "$PG" || echo "postgres exit status $? (ignored, cleanup only)"
-
-  # ci-v9.3: runs only when install, typecheck or lint failed (the unit step, which writes the marker itself, then never runs):
-  # releases the postgres step at once.
-  - name: postgres-stop
-    image: *node
-    depends_on: [install, typecheck, lint]
-    commands:
-      - mkdir -p .tb-ci
-      - echo "an earlier step failed" > .tb-ci/postgres-done
-    when:
-      - status: [failure]
-
   - name: install
     image: *node
     depends_on: [setup]
@@ -99,6 +57,38 @@ steps:
     environment: *env
     commands:
       - node .tb-ci/tb-ci.ts run lint
+
+  # ci-v9.1: opt-in Postgres for tests. Starts only when tealbrick-ci.json has "postgres": true (setup writes
+  # .tb-ci/postgres); otherwise it exits 0 at once. The unit step then gets TB_TEST_DATABASE_URL; tests skip when it is unset.
+  # Ephemeral, no volume; removed with the pipeline.
+  # ci-v9.3: a NORMAL step (not detached) that stops ITSELF. Woodpecker 3.19 ends every detached step (and every service) red
+  # with "no such container" (exit 0) even when it stops cleanly, so ci-v9.1 and ci-v9.2 still showed a red step. The same
+  # self-stopping script as a normal step ends green (portal-core's core-conformance workflow proved it). Woodpecker runs a graph
+  # in stages (all steps whose dependencies are done start together; the next stage starts when ALL of them end), so this step has
+  # the SAME depends_on as unit: the two run side by side in one stage. The runner writes .tb-ci/postgres-done when the unit step
+  # ends (pass, fail or crash); the step then shuts Postgres down (TERM, KILL after 10 s) and exits 0. If install, typecheck or
+  # lint fail, neither step starts (nothing to stop). The wait/exit status is ignored only here, for the cleanup; a database that
+  # never came up still fails the unit step (waitForTcp). A 1 h cap stops the step if the unit step never writes the marker.
+  - name: postgres
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    depends_on: [lint]
+    environment:
+      POSTGRES_USER: tb
+      POSTGRES_PASSWORD: tb-ci-only
+      POSTGRES_DB: tb
+    commands:
+      - if [ ! -f .tb-ci/postgres ]; then echo "postgres not requested (tealbrick-ci.json postgres=false); skipped"; exit 0; fi
+      - DONE="$PWD/.tb-ci/postgres-done"
+      - cd /
+      - docker-entrypoint.sh postgres &
+      - PG=$!
+      - n=0
+      - while [ ! -f "$DONE" ] && kill -0 "$PG" 2>/dev/null && [ "$n" -lt 3600 ]; do n=$((n+1)); sleep 1; done
+      - echo "postgres cleanup (unit step done or cap reached after $n s)"
+      - kill -TERM "$PG" 2>/dev/null || true
+      - k=0; while kill -0 "$PG" 2>/dev/null && [ "$k" -lt 10 ]; do k=$((k+1)); sleep 1; done
+      - kill -KILL "$PG" 2>/dev/null || true
+      - wait "$PG" || echo "postgres exit status $? (ignored, cleanup only)"
 
   - name: unit
     image: *node

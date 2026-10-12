@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -613,21 +613,7 @@ test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keep
   const g = templateGraph(tpl);
   assert.deepEqual(
     [...g.keys()],
-    [
-      "secret-scan",
-      "setup",
-      "postgres",
-      "postgres-stop",
-      "install",
-      "typecheck",
-      "lint",
-      "unit",
-      "conformance",
-      "build",
-      "gen",
-      "image-check",
-      "release-record",
-    ],
+    ["secret-scan", "setup", "install", "typecheck", "lint", "postgres", "unit", "conformance", "build", "gen", "image-check", "release-record"],
   );
   for (const [name, s] of g) {
     assert.equal(s.detach, false, `${name}: no detached steps (they end red on this Woodpecker)`);
@@ -645,33 +631,21 @@ test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keep
     }
   }
   assert.equal(left.size, 0, "the step graph has a cycle");
+  // Woodpecker runs stages: level = 1 + the deepest dependency; a stage ends when ALL its steps end.
+  const level = (n: string): number => 1 + Math.max(0, ...(g.get(n)?.deps ?? []).map(level));
+  assert.equal(level("postgres"), level("unit"), "postgres ends after unit, so it must share unit's stage (an earlier stage deadlocks)");
   // the node chain is the old sequential order
   const chain = ["secret-scan", "setup", "install", "typecheck", "lint", "unit", "conformance", "build", "gen"];
   for (let i = 1; i < chain.length; i++) assert.deepEqual(g.get(chain[i] as string)?.deps, [chain[i - 1]], `${chain[i]} follows ${chain[i - 1]}`);
   assert.deepEqual(g.get("secret-scan")?.deps, []);
-  // postgres runs beside the chain, never in it: nothing waits for it (it ends only after the unit step)
-  for (const [n, s] of g) assert.ok(!s.deps.includes("postgres"), `${n} must not wait for the postgres step`);
-  assert.deepEqual(g.get("postgres")?.deps, ["setup"], "starts after setup decided whether it is requested");
-  // a failed early step releases it at once
-  assert.deepEqual(g.get("postgres-stop")?.deps, ["install", "typecheck", "lint"]);
-  assert.match(g.get("postgres-stop")?.when ?? "", /status: \[failure\]/);
+  // postgres runs BESIDE unit (Woodpecker runs a graph in stages: a stage ends when all its steps end, so postgres, which
+  // ends after unit, must be in unit's stage), never in front of it; nothing may depend on it except through that stage.
+  for (const [n, s2] of g) assert.ok(!s2.deps.includes("postgres"), `${n} must not wait for the postgres step by name`);
+  assert.deepEqual(g.get("postgres")?.deps, g.get("unit")?.deps, "same stage as unit");
+  assert.deepEqual(g.get("postgres")?.deps, ["lint"]);
   // the last two steps end the chain on tags / other events
   assert.deepEqual(g.get("image-check")?.deps, ["gen"]);
   assert.deepEqual(g.get("release-record")?.deps, ["gen"]);
-});
-
-test("ci-v9.3 postgres-stop writes the marker the postgres step waits for", () => {
-  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
-  const script = stepScript(tpl, "postgres-stop");
-  assert.ok(script.includes(PG_DONE_MARKER), "writes the same marker the runner writes");
-  assert.ok(stepScript(tpl, "postgres").includes(PG_DONE_MARKER.replace(".tb-ci/", "")), "and the postgres step waits for it");
-  const work = mkdtempSync(join(tmpdir(), "tb-pg-stop-"));
-  try {
-    spawnSync("sh", ["-e", "-c", script], { cwd: work });
-    assert.equal(existsSync(join(work, PG_DONE_MARKER)), true);
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
 });
 
 test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile check fails closed", () => {
