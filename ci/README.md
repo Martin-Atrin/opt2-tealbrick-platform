@@ -59,7 +59,7 @@ Product pipelines never see the release signing key and write nothing for the in
 
 ## Adopt in a repo
 ```sh
-cd /Users/puma/work/active/tealbrick-opt2/opt2-tealbrick-platform
+cd <workspace>/opt2-tealbrick-platform
 node ci/tb-ci.ts adopt ../opt2-tealbrick-<name> --kind <library|service|miniapp|bridge|portal|web|desktop|specs|tests>
 # then edit ../opt2-tealbrick-<name>/tealbrick-ci.json (images, paths) and commit
 ```

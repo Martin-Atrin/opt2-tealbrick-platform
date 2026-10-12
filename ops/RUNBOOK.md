@@ -7,11 +7,11 @@ Rules that always apply: never print secrets; copy values with `railway variable
 | Signal | Where | Means |
 |---|---|---|
 | Status page red | https://status-production-62da.up.railway.app (JSON: `/api/status`) | a probe failed: Portal, API→Core, Core health (private), website, release index |
-| GlitchTip uptime alert | errors.polygonface.com, org tealbrick: "opt2 portal-gui", "opt2 dev.tealbrick.com", "opt2 website", "opt2 status page" | public endpoint down |
+| GlitchTip uptime alert | the GlitchTip host (URL in the operator notes), org tealbrick: "opt2 portal-gui", "opt2 dev.tealbrick.com", "opt2 website", "opt2 status page" | public endpoint down |
 | GlitchTip heartbeat missed | "opt2 db-backup nightly" | last night's dump or restore test failed or did not run |
 | GlitchTip issues spike | projects opt2-portal-core, opt2-portal-gui | errors in Core or GUI (PII scrubbed server-side) |
 | Railway deploy failed / crash loop | Railway project opt2 → service → Deployments | health check (`/internal/health` Core, `/healthz` status) failing |
-| Woodpecker red | the Woodpecker UI (tailnet-only; URL in the operator notes) | CI; `template-audit` red = a repo below `ci/MIN_TEMPLATE`; the platform `registry-sync` GitHub Actions run red = a release candidate was rejected |
+| Woodpecker red | the Woodpecker UI (private network only; URL in `~/.config/opt2-tealbrick/hosts.env` as `WOODPECKER_URL`, not in this repo) | CI; `template-audit` red = a repo below `ci/MIN_TEMPLATE`; the platform `registry-sync` GitHub Actions run red = a release candidate was rejected |
 
 ## 2. Triage (first 10 minutes)
 1. Which probes are red on the status page? Core health red + API red → Core or Postgres. Only API red → gateway (portal-gui) config. Portal red → GUI deploy or DNS.
@@ -24,7 +24,7 @@ Rules that always apply: never print secrets; copy values with `railway variable
 ## 3. Roll back (pinned SHA)
 Every opt2 service is built from a pushed commit; the previous good SHA is in the Railway deployment list (and in the deploying lead's STATUS note).
 ```sh
-cd /Users/puma/work/active/tealbrick-opt2/opt2-tealbrick-platform
+cd <workspace>/opt2-tealbrick-platform
 node ops/railway-deploy.ts --service <portal-core|portal-gui|website|status|db-backup> --repo opt2-tealbrick-<repo> --sha <previous good sha> [--dockerfile <path>]
 ```
 Faster for a bad deploy: Railway → service → Deployments → previous SUCCESS deployment → "Redeploy" (same image, no rebuild).
