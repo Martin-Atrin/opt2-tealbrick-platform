@@ -62,3 +62,9 @@ Local runs need `GITHUB_TOKEN` in the environment (e.g. `GITHUB_TOKEN="$(gh auth
 ## Key handling
 Private key: Woodpecker secret `release_signing_key` and the owner's local key store (`~/.config/opt2-tealbrick/release-key.pem`, 0600). Never committed or printed.
 Rotation: add the new public key to `keys.json`, re-sign with the new key, then remove the old key in a later change (Core accepts any key in its pinned JWKS).
+
+## Portal Root Keys (C63 / BSD-08)
+- `registry/portal-root-keys.dev.json`: the two PUBLIC JWKs (`root-a` primary, `root-b` backup) of the DEV Portal Root Keys: `{schema: "opt2.portal-root-keys/v1", channel: "dev", keys: [{kty, crv, x, kid (RFC 7638), alg: "EdDSA", use: "sig", tb_role}]}`. Specs pins them as release data in `@opt2-tealbrick/spec` for dev-channel builds.
+- The dev private keys exist ONLY on the Platform operator machine (`~/.config/opt2-tealbrick/portal-root-{a,b}.key`, 0600), never on Railway, Core, CI or in a repo, never printed. Generated with `node ops/root-key.ts generate --channel dev --no-passphrase`.
+- Production roots (`portal-root-keys.stable.json`) do not exist yet: they are generated at cutover in the offline ceremony with Martin (`ops/root-key.ts generate --channel stable`, passphrase per key, separate custody; leads/specs/BSD-08-DESIGN.md "Operations").
+- The root-signed key-set statement (`portal-keyset.jws`, typ `tb-keyset+jws`) is added once Specs ships the typ in `@opt2-tealbrick/manifest`.

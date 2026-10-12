@@ -1,0 +1,25 @@
+{
+  "schema": "opt2.portal-root-keys/v1",
+  "channel": "dev",
+  "generatedAt": "2026-10-12T05:44:23.939Z",
+  "keys": [
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "IIKwS6eT-LIrtVuNO-2VRoGdYk27nBkG8zG_Ed1dt8Q",
+      "kid": "xr8nlOuIDP8GqJOnDvBe6dIc2jwy2T83j2YqlPz6x7A",
+      "alg": "EdDSA",
+      "use": "sig",
+      "tb_role": "root-a"
+    },
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "d-u0BND48bU6DR38KF4GgHh5hatvEUrIS3WccrmiPIs",
+      "kid": "17Gm_IqxFTy4zBA_VgpcCQYN53_Pfh-gLVidSiyJTKg",
+      "alg": "EdDSA",
+      "use": "sig",
+      "tb_role": "root-b"
+    }
+  ]
+}
