@@ -1321,9 +1321,13 @@ function cmdAdopt(args: string[]): void {
     const cfg = { $schema: schemaUrl, kind, paths: ["."], images: [] };
     writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`);
   } else {
-    // keep the repo's settings; pin the schema to the template version (the schema may change between versions)
-    const cur = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
-    writeFileSync(cfgPath, `${JSON.stringify({ ...cur, $schema: schemaUrl }, null, 2)}\n`);
+    // keep the repo's settings AND its formatting; only pin the $schema URL to the template version
+    const text = readFileSync(cfgPath, "utf8");
+    const pinned = /"\$schema"\s*:\s*"[^"]*"/.test(text)
+      ? text.replace(/("\$schema"\s*:\s*)"[^"]*"/, `$1"${schemaUrl}"`)
+      : text.replace(/^\s*\{/, `{\n  "$schema": "${schemaUrl}",`);
+    JSON.parse(pinned); // still valid JSON
+    writeFileSync(cfgPath, pinned);
   }
   const gi = join(target, ".gitignore");
   const giText = existsSync(gi) ? readFileSync(gi, "utf8") : "";

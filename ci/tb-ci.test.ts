@@ -14,7 +14,6 @@ import {
   parsePackageTag,
   releaseUrl,
   renderImagesScript,
-  serializeIndex,
   skillsArchive,
   tarballName,
   validateBridgeRuntime,
