@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  belowMinimum,
   channelForVersion,
   checkDependencies,
   checkPackageJson,
@@ -277,4 +278,13 @@ test("BSA-01: service images belong to an app and match the manifest services", 
 
 test("BSA-03: expected generated files", () => {
   assert.deepEqual(expectedGenFiles("connect"), ["openapi/openapi.json", "kit/connect-kit/package.json", "docs/connect.md", "railway/railway.json"]);
+});
+
+test("D1: minimum template ref", () => {
+  assert.equal(belowMinimum("ci-v5", "ci-v6"), true);
+  assert.equal(belowMinimum("ci-v6", "ci-v6"), false);
+  assert.equal(belowMinimum("ci-v10", "ci-v6"), false);
+  assert.equal(belowMinimum("none", "ci-v6"), true);
+  assert.equal(belowMinimum("main", "ci-v6"), true);
+  assert.throws(() => belowMinimum("ci-v6", "v6"), /bad minimum/);
 });

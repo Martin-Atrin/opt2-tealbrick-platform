@@ -10,7 +10,7 @@
       "type": "string"
     },
     "kind": {
-      "enum": ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"]
+      "enum": ["library", "service", "miniapp", "bridge", "portal", "web", "static", "desktop", "specs", "tests"]
     },
     "paths": {
       "type": "array",

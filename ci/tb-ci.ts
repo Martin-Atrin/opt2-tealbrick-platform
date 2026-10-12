@@ -6,6 +6,7 @@
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
 //   gen                         BSA-03: committed gen/ not stale, `gen` script produces every tb-gen kind, tb-gen check passes
 //   kit-release                 (tag v*, miniapp) tb-gen kit --build -> kit tarball + sha256 on the GitHub release
+//   audit-templates             (platform cron) every opt2 repo's template ref >= ci/MIN_TEMPLATE
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
 //   release-record              (tag v*) release entries (app|bridge) -> GitHub release assets + signed release index
 //   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
@@ -38,7 +39,11 @@ export const INDEX_ISS = "tb:releases";
 export const INDEX_AUD = "tb:portal";
 export const MANIFEST_FILE = "tealbrick.manifest.json";
 
-export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "desktop", "specs", "tests"] as const;
+export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "static", "desktop", "specs", "tests"] as const;
+export const OPT2_REPOS = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "website", "knowledge", "connect", "tbd", "platform", "qa"].map(
+  (n) => `opt2-tealbrick-${n}`,
+);
+export const MIN_TEMPLATE_PATH = "ci/MIN_TEMPLATE";
 export type Kind = (typeof KINDS)[number];
 
 /** Image kinds: `app` and `bridge` become release-index entries; `portal` images are published only (ours, not deployed into workspaces);
@@ -189,6 +194,20 @@ export interface ManifestPkg {
 }
 
 const REQUIRED_SCRIPTS = ["typecheck", "lint", "test"] as const;
+
+/** `ci-vN` -> N; anything else -> NaN. */
+export function templateNumber(ref: string): number {
+  const m = /^ci-v(\d+)$/.exec(ref.trim());
+  return m ? Number(m[1]) : Number.NaN;
+}
+
+/** D1/C56: a template ref below the minimum (or unparseable) is refused. */
+export function belowMinimum(ref: string, min: string): boolean {
+  const a = templateNumber(ref);
+  const b = templateNumber(min);
+  if (Number.isNaN(b)) throw new Error(`bad minimum template ref ${min}`);
+  return Number.isNaN(a) || a < b;
+}
 
 function fail(msg: string): never {
   console.error(`tb-ci: FAIL: ${msg}`);
@@ -616,6 +635,9 @@ async function cmdSetup(): Promise<void> {
   const upstream = await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/${ref}/ci/woodpecker/ci.yaml`);
   if (local !== upstream) fail(`.woodpecker/ci.yaml differs from the platform template ${ref}; re-run adopt, do not edit it by hand`);
   log(`template ${ref}: identical`);
+  const min = (await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/main/${MIN_TEMPLATE_PATH}`)).trim();
+  if (belowMinimum(ref, min)) fail(`template ${ref} is below the enforced minimum ${min} (C56 D1): run adopt from the platform repo`);
+  log(`template ${ref} >= minimum ${min}`);
   if (existsSync(join(root, ".woodpecker/secret-scan.yaml"))) fail(".woodpecker/secret-scan.yaml duplicates the template's secret-scan step; delete it");
   const cfg = loadConfig(root);
   log(`kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} images=${cfg.images.map((i) => i.name).join(",") || "-"}`);
@@ -775,6 +797,21 @@ async function cmdKitRelease(): Promise<void> {
     await uploadFile(repo, releaseId, `${tgz[0]}.sha256`, Buffer.from(`${sha}  ${tgz[0]}\n`), "text/plain");
     log(`kit ${tgz[0]} attached to ${tag} (sha256 ${sha})`);
   }
+}
+
+/** D1/C56: report every opt2 repo's template ref on main; fails if any is missing or below the minimum. */
+async function cmdAuditTemplates(): Promise<void> {
+  const min = (await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/main/${MIN_TEMPLATE_PATH}`)).trim();
+  const bad: string[] = [];
+  for (const repo of OPT2_REPOS) {
+    const res = await fetch(`https://raw.githubusercontent.com/${OWNER}/${repo}/main/.woodpecker/ci.yaml`);
+    const ref = res.ok ? (/TB_CI_REF: (\S+)/.exec(await res.text())?.[1] ?? "none") : "none";
+    const ok = !belowMinimum(ref, min);
+    log(`${ok ? "OK  " : "FAIL"} ${repo}: ${ref}`);
+    if (!ok) bad.push(`${repo} (${ref})`);
+  }
+  if (bad.length) fail(`below minimum ${min}: ${bad.join(", ")}`);
+  log(`all ${OPT2_REPOS.length} repos at or above ${min}`);
 }
 
 function cmdPlanImages(): void {
@@ -1319,6 +1356,8 @@ async function main(argv: string[]): Promise<void> {
       return cmdGen();
     case "kit-release":
       return cmdKitRelease();
+    case "audit-templates":
+      return cmdAuditTemplates();
     case "plan-images":
       return cmdPlanImages();
     case "release-record":
@@ -1337,7 +1376,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|kit-release|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|kit-release|audit-templates|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
       );
   }
 }

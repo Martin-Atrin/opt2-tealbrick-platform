@@ -1,0 +1,9 @@
+# C56 D1: daily check that every opt2 repo uses a template >= ci/MIN_TEMPLATE. Red = some repo must re-adopt.
+when:
+  - event: [cron, manual]
+
+steps:
+  - name: template-audit
+    image: node:24.21.0-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
+    commands:
+      - node ci/tb-ci.ts audit-templates
