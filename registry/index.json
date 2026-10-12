@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T04:14:45.043Z",
+  "generatedAt": "2026-10-12T04:23:41.602Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -899,6 +899,32 @@
       "commit": "acf88d6699abb6485968e361dce7e222b769119b",
       "tag": null,
       "publishedAt": "2026-10-12T04:06:38.032Z"
+    },
+    {
+      "id": "rel_01M4Q5M766YD0Q9FEH6P3H16W2",
+      "product": "knowledge",
+      "kind": "app",
+      "version": "0.1.7",
+      "channel": "dev",
+      "manifestDigest": "sha256:a9bdd7bf4d50baed8b0352d53cc7e8ea12007d8224c9afe3a43e8578b5364d4d",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/52ecb68026488ce916baee810ebbc47fc293a4b7/tealbrick.manifest.json",
+      "skillsDigest": "sha256:d92ec4d5cbae121d44153350789c592fe8d289b85c41aafa21571959e2c349a9",
+      "image": null,
+      "artifact": null,
+      "source": {
+        "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
+        "ref": "52ecb68026488ce916baee810ebbc47fc293a4b7",
+        "dockerfile": "Dockerfile"
+      },
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
+      "commit": "52ecb68026488ce916baee810ebbc47fc293a4b7",
+      "tag": null,
+      "publishedAt": "2026-10-12T04:23:39.974Z"
     },
     {
       "id": "rel_01M4NCYVFMKJ21NEVM3HDWAGNB",
