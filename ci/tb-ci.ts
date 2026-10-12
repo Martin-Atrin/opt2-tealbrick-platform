@@ -534,6 +534,8 @@ export function checkPackedTarball(tgz: Uint8Array): string[] {
 /** ci-v9.1: the unit step talks to the opt-in Postgres step (Woodpecker detached step `postgres`) only when tealbrick-ci.json asks. */
 export const PG_TEST_URL = "postgres://tb:tb-ci-only@postgres:5432/tb";
 export const PG_MARKER = ".tb-ci/postgres";
+/** ci-v9.2: written when the unit step ends (pass or fail); the template's postgres step then stops itself and exits 0. */
+export const PG_DONE_MARKER = ".tb-ci/postgres-done";
 export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out = { ...env };
   if (cfg.postgres) out.TB_TEST_DATABASE_URL = PG_TEST_URL;
@@ -895,6 +897,7 @@ async function cmdSetup(): Promise<void> {
   mkdirSync(join(root, ".tb-ci"), { recursive: true });
   if (cfg.postgres) writeFileSync(join(root, PG_MARKER), "requested by tealbrick-ci.json\n");
   else rmSync(join(root, PG_MARKER), { force: true });
+  rmSync(join(root, PG_DONE_MARKER), { force: true }); // ci-v9.2: never inherit a stale "unit finished" marker
   const errors: string[] = [];
   const urls: string[] = [];
   for (const p of cfg.paths) {
@@ -994,6 +997,16 @@ async function cmdRun(script: string | undefined): Promise<void> {
   if (script === "conformance" && !cfg.conformance) {
     log("SKIP conformance: not required for this repo (tealbrick-ci.json conformance=false)");
     return;
+  }
+  if (script === "test" && cfg.postgres) {
+    // ci-v9.2: tell the detached postgres step to stop itself, however this process ends (pass, fail, process.exit, throw)
+    process.on("exit", () => {
+      try {
+        writeFileSync(join(root, PG_DONE_MARKER), "unit step finished\n");
+      } catch {
+        /* the step's 1 h cap still stops it */
+      }
+    });
   }
   const paths = nodePaths(cfg, root);
   if (paths.length === 0) {

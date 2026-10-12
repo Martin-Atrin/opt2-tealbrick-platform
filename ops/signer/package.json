@@ -3,6 +3,6 @@
   "private": true,
   "description": "SEC-03: the only dependency the platform signer loads (pinned by integrity in package-lock.json).",
   "dependencies": {
-    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz"
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz"
   }
 }

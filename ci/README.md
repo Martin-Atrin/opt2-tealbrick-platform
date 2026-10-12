@@ -1,11 +1,11 @@
-# opt2 CI standard (template ci-v9.1)
+# opt2 CI standard (template ci-v9.2)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
 `setup` step fails when the copy drifts, when `tealbrick-ci.json` is invalid, or when package rules are broken.
 
 ## Enforcement (C56 D1)
-- `ci/MIN_TEMPLATE` on platform `main` holds the minimum template ref (now `ci-v8`). From ci-v6 on, `setup` fails when the repo's template is below it, so raising the file forces every repo to re-adopt.
+- `ci/MIN_TEMPLATE` on platform `main` holds the minimum template ref (now `ci-v8`; it may move to `ci-v9.1` only when all 18 repos in `OPT2_REPOS` are on ci-v9.1 or later, which they were not at ci-v9.2: packages, portal-core, portal-gui, website, tbd and qa on ci-v8, samples on ci-v9). From ci-v6 on, `setup` fails when the repo's template is below it, so raising the file forces every repo to re-adopt.
 - Template refs are `ci-vN` or, for a point release, `ci-vN.M` (ci-v9.1 on). They compare as major.minor: `ci-v9` < `ci-v9.1` < `ci-v10`. A runner older than ci-v9.1 cannot parse `ci-vN.M`, so `MIN_TEMPLATE` may name a point release only after every repo is on ci-v9.1 or later.
 - Repos still on a template older than ci-v6 (which has no such check) are caught by the platform's daily `template-audit` pipeline (`node ci/tb-ci.ts audit-templates`): it goes red and names them.
 - One template for every repo. Kinds: `library`, `service`, `miniapp`, `bridge`, `portal`, `web`, `static` (static site, e.g. the website: node stages + build, no images), `desktop` (TBD: `paths` = the TypeScript projects, e.g. `["chat"]`), `specs`, `tests`.
@@ -23,8 +23,8 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
-| postgres (opt-in, ci-v9.1) | detached step after `setup`. Starts an ephemeral Postgres 17 only when `tealbrick-ci.json` has `"postgres": true`; otherwise it exits 0 at once (green). When on, the `unit` step waits for it (max 90 s) and gets `TB_TEST_DATABASE_URL`; tests that want a real database skip when it is unset | opted in and not reachable within 90 s |
-| release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62) | invalid manifest, version mismatch, any token in the environment |
+| postgres (opt-in, ci-v9.1) | detached step after `setup`. Starts an ephemeral Postgres 17 only when `tealbrick-ci.json` has `"postgres": true`; otherwise it exits 0 at once (green). When on, the `unit` step waits for it (max 90 s) and gets `TB_TEST_DATABASE_URL`; tests that want a real database skip when it is unset. ci-v9.2: the step stops itself when the unit step ends (see below), so it is green | opted in and not reachable within 90 s |
+| release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62). ci-v9.2: pinned to `@opt2-tealbrick/manifest` 0.1.8 (spec 0.1.13: wildcard companions, M-CP-3; 0.1.5 refused `product:"*"`) | invalid manifest, version mismatch, any token in the environment |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
 
@@ -36,7 +36,7 @@ Every releasing repo (images, miniapp kit, or package tarballs) carries `.github
 Actions are pinned by full commit SHA and limited to the official actions/checkout, setup-node, upload-artifact and download-artifact. Woodpecker keeps every other stage and holds no secrets.
 
 ## Release signing (SEC-03, C72)
-Product pipelines never see the release signing key and write nothing for the index. The platform repo's `.github/workflows/registry-sync.yml` (GitHub Actions, every 15 min + manual, main only, environment `registry` restricted to `main`, secret `RELEASE_SIGNING_KEY`) is the only job that holds the key. It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). It discovers new `v*` tags in the opt2 repos, reads `tealbrick-ci.json` at the tag commit and resolves each declared image's `:<version>` digest in ghcr anonymously (tags without published images stay pending; packages must be PUBLIC). For each release it:
+Product pipelines never see the release signing key and write nothing for the index. The platform repo's `.github/workflows/registry-sync.yml` (GitHub Actions, every 15 min + manual, main only, environment `registry` restricted to `main`, secret `RELEASE_SIGNING_KEY`) is the only job that holds the key. It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). Since ci-v9.2 the signer and the template's `release-record` step use the SAME manifest version and integrity (0.1.8); a unit test fails if they drift. To change it: edit `ops/signer/package.json`, `npm install --package-lock-only --ignore-scripts` in `ops/signer`, update `TB_MANIFEST_PKG`/`TB_MANIFEST_INTEGRITY` in the template, compare the integrity with `coordination/specs/RELEASES.md`, and dry-run the signer first (verify `registry/index.jws`, re-merge the index unchanged, re-sign with a throw-away key, re-validate every app manifest). It discovers new `v*` tags in the opt2 repos, reads `tealbrick-ci.json` at the tag commit and resolves each declared image's `:<version>` digest in ghcr anonymously (tags without published images stay pending; packages must be PUBLIC). For each release it:
 1. checks the tag points at the commit;
 2. re-reads the manifest, skill files and bridge runtime from the repo AT that commit (as data) and re-derives `manifestDigest`, `skillsDigest`, the runtime record;
 3. checks the service images equal the manifest services that have `build`;
@@ -76,9 +76,7 @@ Schema: `ci/tealbrick-ci.schema.json`. Example for a miniapp:
 ```
 Image names are the repo name or `<repo>-<component>` (for example `opt2-tealbrick-bridge-server`).
 Optional `"postgres": true` (ci-v9.1) starts the test database step; leave it out when no test reads `TB_TEST_DATABASE_URL`.
-Known (Woodpecker 3.19): when opted in, the detached `postgres` step is still running at pipeline end and Woodpecker marks it
-red ("no such container") on a green pipeline (probe: platform pipeline 97, unit reached the database). The step is not a gate.
-Opted-out repos get a green "skipped" step. Candidate fix for the next template: the step stops itself on a marker the unit step writes.
+ci-v9.2 (was a known red step in ci-v9.1): the detached `postgres` step used to be still running when the pipeline ended, and Woodpecker 3.19 marks such a step red ("no such container") on a green pipeline. Now the runner writes `.tb-ci/postgres-done` when `run test` ends (pass, fail or crash; `setup` clears a stale one), and the step, which runs Postgres in the background instead of `exec`, sees the marker, sends TERM (KILL after 10 s) and exits 0. Only the cleanup ignores an exit status (`wait ... || echo`); a database that never comes up still fails the `unit` step (`waitForTcp`). A 1 h cap stops the step if the unit step never runs. Opted-out repos still get a green "skipped" step.
 
 Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "service"` image per manifest `runtime.services[]` entry that has `build` (same `product` as the app, `service` = the manifest service id). Setup fails if they do not match the manifest. On `v*` tags every image is published, and the app's release entry lists `services: [{id, image@sha256}]`.
 ```json

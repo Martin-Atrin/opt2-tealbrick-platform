@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import {
@@ -18,6 +21,7 @@ import {
   mergeIndex,
   missingPackTargets,
   newId,
+  PG_DONE_MARKER,
   PG_MARKER,
   PG_TEST_URL,
   packageBuildArgs,
@@ -311,6 +315,8 @@ test("ci-v9.1: point-release template refs compare as major.minor", () => {
   assert.equal(belowMinimum("ci-v9.1", "ci-v9"), false);
   assert.equal(belowMinimum("ci-v9", "ci-v9.1"), true);
   assert.equal(belowMinimum("ci-v9.1", "ci-v9.2"), true);
+  assert.equal(belowMinimum("ci-v9.2", "ci-v9.1"), false);
+  assert.equal(belowMinimum("ci-v9.2", "ci-v10"), true);
   assert.equal(belowMinimum("ci-v10", "ci-v9.1"), false);
 });
 
@@ -474,4 +480,108 @@ test("ci-v9.1 postgres is opt-in: config, unit env and template", () => {
   assert.match(step, /detach: true/);
   assert.ok(step.includes(`if [ ! -f ${PG_MARKER} ]; then`) && step.includes("exit 0"), "skips (green) unless setup wrote the marker");
   assert.ok(tpl.indexOf("- name: setup") < tpl.indexOf("- name: postgres"), "postgres starts after setup decided");
+});
+
+// ---------- ci-v9.2 ----------
+
+/** The `commands` of one template step, as the shell script Woodpecker would run (set -e). */
+function stepScript(tpl: string, name: string): string {
+  const step = new RegExp(`- name: ${name}\\n([\\s\\S]*?)\\n\\n`).exec(tpl)?.[1] ?? "";
+  const cmds = step.slice(step.indexOf("commands:")).split("\n").slice(1);
+  return cmds.map((l) => l.replace(/^ {6}- /, "")).join("\n");
+}
+
+test("ci-v9.2: release-record and the signer pin the SAME manifest package, with integrity", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const url = /TB_MANIFEST_PKG: (\S+)/.exec(tpl)?.[1] ?? "";
+  const integrity = /TB_MANIFEST_INTEGRITY: (\S+)/.exec(tpl)?.[1] ?? "";
+  assert.match(url, /manifest-v(\d+\.\d+\.\d+)\/opt2-tealbrick-manifest-\1\.tgz$/);
+  assert.match(integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
+  const version = /manifest-v(\S+?)\//.exec(url)?.[1] ?? "";
+  assert.deepEqual(version.split(".").map(Number).slice(0, 2), [0, 1]);
+  assert.ok(Number(version.split(".")[2]) >= 8, "wildcard companions (spec 0.1.13, M-CP-3) need manifest >= 0.1.8");
+  const signerPkg = JSON.parse(readFileSync(new URL("../ops/signer/package.json", import.meta.url), "utf8")) as { dependencies: Record<string, string> };
+  assert.equal(signerPkg.dependencies["@opt2-tealbrick/manifest"], url, "signer dependency == template pin");
+  const lock = JSON.parse(readFileSync(new URL("../ops/signer/package-lock.json", import.meta.url), "utf8")) as {
+    packages: Record<string, { version?: string; resolved?: string; integrity?: string }>;
+  };
+  const locked = lock.packages["node_modules/@opt2-tealbrick/manifest"];
+  assert.equal(locked.version, version);
+  assert.equal(locked.resolved, url);
+  assert.equal(locked.integrity, integrity, "signer lockfile integrity == template integrity");
+  assert.ok(lock.packages["node_modules/@opt2-tealbrick/spec"]?.integrity?.startsWith("sha512-"), "the spec dependency is integrity-pinned in the lockfile");
+  const wf = readFileSync(new URL("../.github/workflows/registry-sync.yml", import.meta.url), "utf8");
+  assert.match(wf, /npm ci --prefix ops\/signer --ignore-scripts/);
+});
+
+test("ci-v9.2: the template and the release workflow carry the same ref", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const gh = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
+  const ref = /TB_CI_REF: (\S+)/.exec(tpl)?.[1];
+  assert.equal(/TB_CI_REF: (\S+)/.exec(gh)?.[1], ref);
+  assert.equal(new RegExp(`template ${ref}`).test(tpl.split("\n")[0]), true);
+});
+
+test("ci-v9.2 postgres step stops itself: marker, TERM then KILL, exit 0", async () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const script = stepScript(tpl, "postgres");
+  assert.ok(script.includes(PG_DONE_MARKER.replace(".tb-ci/", "")), "waits for the marker the runner writes");
+  assert.doesNotMatch(script, /exec docker-entrypoint/, "no exec: the shell must survive to clean up");
+  assert.match(script, /kill -TERM/);
+  assert.match(script, /kill -KILL/);
+
+  const work = mkdtempSync(join(tmpdir(), "tb-pg-step-"));
+  try {
+    const bin = join(work, "bin");
+    mkdirSync(bin);
+    mkdirSync(join(work, ".tb-ci"));
+    // fake postgres entrypoint (the real one is the postgres image's)
+    const fake = (body: string) => {
+      writeFileSync(join(bin, "docker-entrypoint.sh"), `#!/bin/sh\n${body}\n`);
+      chmodSync(join(bin, "docker-entrypoint.sh"), 0o755);
+    };
+    const run = (markerAfterMs: number | null) =>
+      new Promise<{ status: number | null; out: string }>((done) => {
+        const child = spawn("sh", ["-e", "-c", script], { cwd: work, env: { PATH: `${bin}:${process.env.PATH}` } });
+        let out = "";
+        child.stdout.on("data", (d: Buffer) => {
+          out += d.toString();
+        });
+        child.stderr.on("data", (d: Buffer) => {
+          out += d.toString();
+        });
+        const guard = setTimeout(() => child.kill("SIGKILL"), 40_000);
+        if (markerAfterMs !== null) setTimeout(() => writeFileSync(join(work, PG_DONE_MARKER), "done\n"), markerAfterMs);
+        child.on("close", (status) => {
+          clearTimeout(guard);
+          done({ status, out });
+        });
+      });
+
+    // 1. not requested: exits 0 at once, never starts postgres
+    fake(`echo started >> "${work}/started"; sleep 30`);
+    const skipped = await run(null);
+    assert.equal(skipped.status, 0, skipped.out);
+    assert.equal(existsSync(join(work, "started")), false);
+
+    // 2. requested; the runner writes the marker later -> TERM -> exit 0 although the server exits 143
+    writeFileSync(join(work, PG_MARKER), "x\n");
+    fake(`trap 'echo term >> "${work}/signals"; exit 143' TERM\nwhile :; do sleep 0.1; done`);
+    const t0 = Date.now();
+    const stopped = await run(1500);
+    assert.equal(stopped.status, 0, stopped.out);
+    assert.ok(Date.now() - t0 >= 1400, "it kept running until the marker appeared");
+    assert.match(readFileSync(join(work, "signals"), "utf8"), /term/);
+    assert.match(stopped.out, /ignored, cleanup only/);
+
+    // 3. a server that ignores TERM is killed after the grace period; still exit 0
+    fake("trap '' TERM\nwhile :; do sleep 0.1; done");
+    rmSync(join(work, PG_DONE_MARKER), { force: true });
+    const t1 = Date.now();
+    const hung = await run(500);
+    assert.equal(hung.status, 0, hung.out);
+    assert.ok(Date.now() - t1 >= 9000, "waited the grace period before KILL");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
