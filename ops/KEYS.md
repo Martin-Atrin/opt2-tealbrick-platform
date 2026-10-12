@@ -20,5 +20,13 @@ Values are never printed: every copy goes through `railway variable set <KEY> --
 5. Delete `TB_KEK_PREVIOUS` and redeploy. Boot must succeed without it.
 6. Update the Vaultwarden copy of `TB_KEK` (Martin) and note the date and new `kekId` (never the value) in ops/ROTATION-LOG.md.
 
+## Portal signing key compromise — "rotate now" (C60 / SEC-15; Core 4778e23)
+Use when a Portal signing key may have leaked. Values never printed; project "opt2", service portal-core.
+1. Set `TB_PORTAL_KEY_ROTATE_NOW` = a new random id (≥ 16 chars, e.g. `${{secret(24)}}` or a fresh ULID) with `railway variable set --stdin`, then deploy. Boot logs `portal key rotated now newKid=… compromisedKid=…`. The same id never rotates twice (re-deploys are safe).
+2. Online bridges receive a transition config within ≤ 60 s (signed with the old key, listing only the new key); after their ack everything is signed with the new key. Bridges offline > 12 h must be re-enrolled (`bridge.enrolment_code` in Portal).
+3. Revoke every pairing connection created since the suspected leak (`connections.revoke`).
+4. If `TB_KEK` may have leaked too: rotate the KEK (procedure above), re-link Railway, roll the Stripe and Clerk webhook secrets (RUNBOOK §4).
+5. Remove `TB_PORTAL_KEY_ROTATE_NOW` afterwards, record the incident in ops/INCIDENTS.md and the new kid (never a value) in ops/ROTATION-LOG.md.
+
 ## Logs and errors
 - GlitchTip projects have server-side PII scrubbing on (keys: authorization, cookie, token, secret, password, key, kek, grant, ticket, enrol, code, session, dsn, jwt, jws, signature, assert, call; emails, cards, private keys) and IP scrubbing. This is a backstop: services must not log tokens, codes, keys or bodies in the first place.

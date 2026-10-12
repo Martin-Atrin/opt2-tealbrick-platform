@@ -16,6 +16,16 @@
 3. Point a temporary Core deployment at it; Core health + read-only registry queries pass.
 4. Record in this file; delete the drill service.
 
+## Bridge + app volume restore test — C16 S7 / C56 D8 (2026-10-12) — PASS
+Target: Core's running probe in project opt2-test-customer: workspace ws_01M4Q5KRKQDG4MZN117XG2GBWP, bridge brg_01M4Q5KRKQDG4MZN117XG2GBWQ (0.1.8, service tb-bridge), Knowledge ins_01M4Q5N4791549VB8MTQQCMDEY (service tb-knowledge). No browser, no person sign-in: Railway API + `railway ssh` only.
+1. Before: bridge kid `ltaGNA8NU8noEzD9jeLBcn4B95qujNeTYWTrzNyx1Gs` (public, from /data/bridge/identity.json; private key sealed with TB_KEK), `/readyz` 200. Knowledge app.db row counts recorded (tb_migrations=3, tb_meta=2, tb_scope_instances=1, tb_audit=2, kn_areas=1, …). Canary `/data/tb-d8-canary.txt` ("D8 canary 20261012T042916Z") written on both volumes.
+2. Railway backups (`volumeInstanceBackupCreate`) at 04:29:54 UTC: bridge 5d946251-… ("d8-restore-test-bridge"), Knowledge 89c7e54e-… ("d8-restore-test-knowledge").
+3. After the backup: marker `/data/tb-d8-marker-post-backup.txt` written on both volumes.
+4. Restore (`volumeInstanceBackupRestore`): Railway creates a NEW volume from the snapshot and stages a mount swap; the staged change must be committed (`environmentPatchCommitStaged`), which redeploys the service. Restore one volume at a time: two restores in a row left only the last staged change.
+5. After: tb-bridge redeployed SUCCESS on the restored volume; `/healthz` 200, `/readyz` 200; same kid `ltaGNA8…yx1Gs`, same bridgeId; canary present; marker GONE; no re-enrolment (identity unsealed with the provider-held TB_KEK). tb-knowledge redeployed SUCCESS on the restored volume; `/tb/v1/health` 200 (`needs_keys`, as before: no model key entered); canary present; marker GONE; every app.db row count identical; bridge stayed ready.
+6. Backup schedules (DAILY 6 d, WEEKLY 27 d) carried over to the restored volumes. The replaced volumes (tb-bridge-volume-cJBb, tb-knowledge-volume-4vl-) are detached and fall under Railway's 48 h deletion.
+Runbook implication: a Railway volume restore = new volume + staged swap + commit + redeploy; budget ~2 min per service; restore services one at a time.
+
 ## Bridge + app volumes (customer workspaces) — C16 S7
 Bridge: Railway volume backup DAILY, kept 7 days, set by the bridge template (BRIDGE.md). `TB_KEK` is provider-held and not in the volume. Restore test at P2 in project opt2-test-customer: restore the latest bridge volume backup into a fresh bridge service with the same `TB_KEK` reference, check it unseals its state and serves its last good config.
 Apps: baked into the Miniapp SDK (each app's backup volume in its Railway template) — owned by Lead · Specs & SDK; Platform adds the restore test for the test customer workspace at P2.
