@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v9)
+# opt2 CI standard (template ci-v9.1)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -6,6 +6,7 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 
 ## Enforcement (C56 D1)
 - `ci/MIN_TEMPLATE` on platform `main` holds the minimum template ref (now `ci-v8`). From ci-v6 on, `setup` fails when the repo's template is below it, so raising the file forces every repo to re-adopt.
+- Template refs are `ci-vN` or, for a point release, `ci-vN.M` (ci-v9.1 on). They compare as major.minor: `ci-v9` < `ci-v9.1` < `ci-v10`. A runner older than ci-v9.1 cannot parse `ci-vN.M`, so `MIN_TEMPLATE` may name a point release only after every repo is on ci-v9.1 or later.
 - Repos still on a template older than ci-v6 (which has no such check) are caught by the platform's daily `template-audit` pipeline (`node ci/tb-ci.ts audit-templates`): it goes red and names them.
 - One template for every repo. Kinds: `library`, `service`, `miniapp`, `bridge`, `portal`, `web`, `static` (static site, e.g. the website: node stages + build, no images), `desktop` (TBD: `paths` = the TypeScript projects, e.g. `["chat"]`), `specs`, `tests`.
 - Written exemption, desktop: the macOS/Swift build, signing and notarization cannot run on the Linux CI host. They run on the release Mac (`scripts/release.sh` in opt2-tealbrick-tbd); the release enters the index only through `registry-add-desktop`, which checks the artifact sha256. Secret scan, typecheck, lint, unit and build of the TypeScript parts run in this template like everywhere else. A repo-specific `.woodpecker/*.yml` that repeats these stages (e.g. the old `chat.yml`) must be deleted.
@@ -22,14 +23,15 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
-| (services) postgres | ephemeral Postgres 17 for every pipeline; tests that want a real database read `TB_TEST_DATABASE_URL` and skip when it is unset | — |
+| postgres (opt-in, ci-v9.1) | detached step after `setup`. Starts an ephemeral Postgres 17 only when `tealbrick-ci.json` has `"postgres": true`; otherwise it exits 0 at once (green). When on, the `unit` step waits for it (max 90 s) and gets `TB_TEST_DATABASE_URL`; tests that want a real database skip when it is unset | opted in and not reachable within 90 s |
 | release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62) | invalid manifest, version mismatch, any token in the environment |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
 
 ## Release publishing (C72): GitHub Actions, no personal token
 Every releasing repo (images, miniapp kit, or package tarballs) carries `.github/workflows/opt2-release.yml`, a byte-identical copy of `ci/github/opt2-release.yml` (setup fails on drift; `adopt` writes it). It runs on `v*` and `<pkg>-v*` tags only:
-1. `build` job — `permissions: contents: read`. Fetches the hash-checked runner, then `tb-ci gh-build`: `docker build` each declared image from the tagged commit with OCI labels (source, revision, version) and saves it to a tarball; builds the miniapp kit (`tb-gen kit --build`) or packs the tagged workspace package (`npm pack --ignore-scripts`). Installs use `--frozen-lockfile --ignore-scripts`. No write token exists in this job.
+1. `build` job — `permissions: contents: read`. Fetches the hash-checked runner, then `tb-ci gh-build`: `docker build` each declared image from the tagged commit with OCI labels (source, revision, version) and saves it to a tarball; builds the miniapp kit (`tb-gen kit --build`), or for a package tag installs, BUILDS (root `build` script, else `pnpm --filter <pkg>... run --if-present build`) and packs the tagged workspace package (`npm pack --ignore-scripts`). Installs use `--frozen-lockfile --ignore-scripts`. No write token exists in this job.
+   - Pack guard (ci-v9.1, C75): after `npm pack` the runner reads the tarball and fails if any `main`, `module`, `types`/`typings`, `bin` or `exports` target of the packed `package.json` is missing (for example no `dist/`). ci-v9 packed without a build, so `<pkg>-v*` tarballs released by the ci-v9 workflow can lack `dist/`; re-release them from ci-v9.1.
 2. `publish` job — `permissions: packages: write, contents: write`, built-in `GITHUB_TOKEN`. Runs NO repo code: loads the image tarballs, pushes `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>`, prints the digest (information only), attaches kit/package tarballs + `.sha256` to the GitHub release.
 Actions are pinned by full commit SHA and limited to the official actions/checkout, setup-node, upload-artifact and download-artifact. Woodpecker keeps every other stage and holds no secrets.
 
@@ -73,6 +75,7 @@ Schema: `ci/tealbrick-ci.schema.json`. Example for a miniapp:
 }
 ```
 Image names are the repo name or `<repo>-<component>` (for example `opt2-tealbrick-bridge-server`).
+Optional `"postgres": true` (ci-v9.1) starts the test database step; leave it out when no test reads `TB_TEST_DATABASE_URL`.
 
 Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "service"` image per manifest `runtime.services[]` entry that has `build` (same `product` as the app, `service` = the manifest service id). Setup fails if they do not match the manifest. On `v*` tags every image is published, and the app's release entry lists `services: [{id, image@sha256}]`.
 ```json
@@ -84,8 +87,9 @@ Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "
 
 ## Package releases (multi-package repos: specs, sdk, bridge, packages)
 Tag `<dir>-v<semver>` where `<dir>` is the folder name under `packages/` and `<semver>` equals that package.json `version`
-(e.g. `manifest-v0.1.0`). CI runs the full pipeline (incl. `build`), rewrites in-repo `workspace:` deps to their release URLs
-(they must be released first), runs `npm pack`, and attaches `<name>-<version>.tgz` + `.sha256` to the GitHub release.
+(e.g. `manifest-v0.1.0`). The release workflow installs, runs the build, rewrites in-repo `workspace:` deps to their release URLs
+(they must be released first), runs `npm pack`, checks the tarball with the pack guard, and attaches `<name>-<version>.tgz` + `.sha256` to the GitHub release.
+Local check before tagging (same path as the Action, no token): `CI_WORKSPACE=$PWD CI_REPO_NAME=<repo> CI_COMMIT_TAG=<dir>-v<ver> CI_COMMIT_SHA=$(git rev-parse HEAD) node <platform>/ci/tb-ci.ts gh-build`, then inspect `.tb-ci/out/assets/*.tgz`.
 Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`).
 
 ## App releases

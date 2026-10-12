@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { gzipSync } from "node:zlib";
 import {
   addPnpmIntegrity,
   belowMinimum,
   channelForVersion,
   checkDependencies,
   checkPackageJson,
+  checkPackedTarball,
   checkServiceImages,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
@@ -13,14 +16,23 @@ import {
   type IndexRelease,
   lockfileTarballs,
   mergeIndex,
+  missingPackTargets,
   newId,
+  PG_MARKER,
+  PG_TEST_URL,
+  packageBuildArgs,
   packageManagerPinned,
+  packageReleaseCommands,
+  packEntryTargets,
   parsePackageTag,
   releaseUrl,
   renderImagesScript,
   sha512Integrity,
   skillsArchive,
   tarballName,
+  tarEntries,
+  templateVersion,
+  testEnv,
   validateBridgeRuntime,
   validateConfig,
   validateHarnesses,
@@ -291,6 +303,17 @@ test("D1: minimum template ref", () => {
   assert.throws(() => belowMinimum("ci-v6", "v6"), /bad minimum/);
 });
 
+test("ci-v9.1: point-release template refs compare as major.minor", () => {
+  assert.deepEqual(templateVersion("ci-v9.1"), [9, 1]);
+  assert.deepEqual(templateVersion("ci-v9"), [9, 0]);
+  assert.equal(templateVersion("ci-v9.x"), null);
+  assert.equal(belowMinimum("ci-v9.1", "ci-v8"), false);
+  assert.equal(belowMinimum("ci-v9.1", "ci-v9"), false);
+  assert.equal(belowMinimum("ci-v9", "ci-v9.1"), true);
+  assert.equal(belowMinimum("ci-v9.1", "ci-v9.2"), true);
+  assert.equal(belowMinimum("ci-v10", "ci-v9.1"), false);
+});
+
 test("S3: lockfile tarball integrity detection", () => {
   const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
   const pnpm = `packages:\n  '@opt2-tealbrick/manifest@${url}':\n    resolution: {tarball: ${url}}\n    version: 0.1.3\n  ajv@8.17.1:\n    resolution: {integrity: sha512-abc}\n`;
@@ -352,4 +375,103 @@ test("C62: Dockerfile installs must be frozen and script-free", () => {
   assert.match(dockerfileInstallProblems("FROM node\nRUN npm install express\n").join(), /npm install in an image build/);
   assert.match(dockerfileInstallProblems("FROM node\nRUN npm ci\n").join(), /npm ci without --ignore-scripts/);
   assert.deepEqual(dockerfileInstallProblems("FROM node\n# RUN npm install x\nRUN echo pnpm\n"), []);
+});
+
+// ---------- ci-v9.1 (C75) ----------
+
+/** Minimal ustar writer for tests (pax `path` header for names over 100 bytes, as npm pack writes them). */
+function makeTgz(files: Record<string, string>): Buffer {
+  const blocks: Buffer[] = [];
+  const header = (name: string, size: number, type: string): Buffer => {
+    const h = Buffer.alloc(512);
+    h.write(name.slice(0, 99), 0);
+    h.write("0000644\0", 100);
+    h.write(`${size.toString(8).padStart(11, "0")}\0`, 124);
+    h.write(type, 156);
+    h.write("ustar\0", 257);
+    h.write("00", 263);
+    h.fill(32, 148, 156);
+    let sum = 0;
+    for (const b of h) sum += b;
+    h.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148);
+    return h;
+  };
+  const pad = (b: Buffer): Buffer => Buffer.concat([b, Buffer.alloc((512 - (b.length % 512)) % 512)]);
+  for (const [rel, text] of Object.entries(files)) {
+    const name = `package/${rel}`;
+    const data = Buffer.from(text);
+    if (name.length > 99) {
+      const rec = ` path=${name}\n`;
+      let len = rec.length + 2;
+      if (`${len}${rec}`.length !== len) len += 1;
+      const pax = Buffer.from(`${len}${rec}`);
+      blocks.push(header("PaxHeader", pax.length, "x"), pad(pax));
+    }
+    blocks.push(header(name, data.length, "0"), pad(data));
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+
+const specPkg = {
+  name: "@opt2-tealbrick/spec",
+  version: "0.1.11",
+  exports: {
+    ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+    "./schemas/*": "./schemas/*",
+  },
+  bin: { "tb-x": "./dist/cli.js" },
+};
+
+test("C75 build step: gh-build installs (frozen, no scripts), then builds, before packing", () => {
+  const cmds = packageReleaseCommands([{ dir: "/w", pm: "pnpm" }], "/w", { build: "pnpm -r run build" }, "@opt2-tealbrick/spec");
+  assert.deepEqual(
+    cmds.map((c) => [c.cwd, c.cmd, ...c.args].join(" ")),
+    ["/w corepack pnpm install --frozen-lockfile --ignore-scripts", "/w corepack pnpm run build"],
+  );
+  assert.equal(cmds.at(-1)?.args.includes("build"), true, "the last command before pack is the build");
+  assert.deepEqual(packageBuildArgs({ build: "tsc -b" }, "@x/y"), ["pnpm", "run", "build"]);
+  assert.deepEqual(packageBuildArgs({}, "@x/y"), ["pnpm", "--filter", "@x/y...", "run", "--if-present", "build"]);
+});
+
+test("C75 pack guard: entry targets of main/exports/types/bin", () => {
+  assert.deepEqual(packEntryTargets(specPkg), ["dist/cli.js", "dist/index.d.ts", "dist/index.js", "schemas/*"]);
+  assert.deepEqual(packEntryTargets({ main: "./lib/a.js", types: "lib/a.d.ts", bin: "./bin/x.js", exports: ["./lib/a.js", null] }), [
+    "bin/x.js",
+    "lib/a.d.ts",
+    "lib/a.js",
+  ]);
+  assert.deepEqual(missingPackTargets(specPkg, ["package.json", "dist/index.js", "dist/index.d.ts", "dist/cli.js", "schemas/a.json"]), []);
+  assert.deepEqual(missingPackTargets(specPkg, ["package.json", "dist/index.js", "dist/index.d.ts", "dist/cli.js"]), ["schemas/*"]);
+  assert.deepEqual(missingPackTargets({ main: "index" }, ["index.js"]), [], "extension-less main resolves like Node");
+});
+
+test("C75 pack guard: passes a built tarball, fails one without dist/", () => {
+  const pj = JSON.stringify(specPkg);
+  const long = `schemas/${"deep/".repeat(20)}x.json`;
+  const built = makeTgz({ "package.json": pj, "dist/index.js": "", "dist/index.d.ts": "", "dist/cli.js": "", [long]: "{}" });
+  assert.ok(tarEntries(built).has(long), "pax long names are read");
+  assert.deepEqual(checkPackedTarball(built), []);
+  const unbuilt = makeTgz({ "package.json": pj, "schemas/a.json": "{}" });
+  const problems = checkPackedTarball(unbuilt);
+  assert.equal(problems.length, 3);
+  assert.ok(problems.every((p) => p.startsWith("@opt2-tealbrick/spec: dist/")));
+  assert.deepEqual(checkPackedTarball(makeTgz({ "README.md": "" })), ["the tarball has no package.json"]);
+});
+
+test("ci-v9.1 postgres is opt-in: config, unit env and template", () => {
+  assert.equal(validateConfig({ kind: "library" }, repo).postgres, false);
+  assert.equal(validateConfig({ kind: "library", postgres: true }, repo).postgres, true);
+  assert.throws(() => validateConfig({ kind: "library", postgres: "yes" }, repo), /postgres must be boolean/);
+  const off = testEnv(validateConfig({ kind: "library" }, repo), { TB_TEST_DATABASE_URL: "x", PATH: "/bin" });
+  assert.equal(off.TB_TEST_DATABASE_URL, undefined);
+  assert.equal(off.PATH, "/bin");
+  assert.equal(testEnv(validateConfig({ kind: "library", postgres: true }, repo), {}).TB_TEST_DATABASE_URL, PG_TEST_URL);
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  assert.doesNotMatch(tpl, /^services:/m, "no always-on service (it showed a red step on green pipelines)");
+  assert.doesNotMatch(tpl, /TB_TEST_DATABASE_URL:/, "the runner sets the URL only when opted in");
+  const step = /- name: postgres\n([\s\S]*?)\n\n/.exec(tpl)?.[1] ?? "";
+  assert.match(step, /detach: true/);
+  assert.ok(step.includes(`if [ ! -f ${PG_MARKER} ]; then`) && step.includes("exit 0"), "skips (green) unless setup wrote the marker");
+  assert.ok(tpl.indexOf("- name: setup") < tpl.indexOf("- name: postgres"), "postgres starts after setup decided");
 });

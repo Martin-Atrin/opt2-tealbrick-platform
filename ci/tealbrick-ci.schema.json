@@ -25,6 +25,11 @@
       "type": "boolean",
       "description": "Default: true for miniapp and bridge, else false."
     },
+    "postgres": {
+      "type": "boolean",
+      "default": false,
+      "description": "ci-v9.1: start the ephemeral Postgres 17 step and set TB_TEST_DATABASE_URL for the unit step. Default false (no database step)."
+    },
     "images": {
       "type": "array",
       "items": {

@@ -10,7 +10,7 @@
 //   release-record              (tag v*) validate + print the release; no token, no key (C62); the platform signer indexes it
 //   registry-sync               (platform signer pipeline only) verify candidates independently, index + sign
 //   pin-tarballs [<repoDir>]    (local) pin sha512 of GitHub-release tarballs the lockfile has no integrity for (S3)
-//   package-pack                (tag <pkg>-v*) npm pack --ignore-scripts without tokens (used by gh-build)
+//   package-pack                (tag <pkg>-v*) npm pack --ignore-scripts without tokens, then the pack guard (used by gh-build after the build)
 //   gh-build / gh-publish       (C72, GitHub Actions) build without a write token / push images + attach assets, no repo code
 //   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
@@ -23,8 +23,10 @@
 import { execFileSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { gunzipSync } from "node:zlib";
 
 export const OWNER = "Martin-Atrin";
 export const REGISTRY_HOST = "ghcr.io";
@@ -80,6 +82,7 @@ export interface CiConfig {
   paths: string[];
   conformance: boolean;
   images: ImageSpec[];
+  postgres: boolean; // ci-v9.1: opt-in ephemeral Postgres for the unit step (TB_TEST_DATABASE_URL)
 }
 
 /** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
@@ -209,18 +212,23 @@ export interface ManifestPkg {
 
 const REQUIRED_SCRIPTS = ["typecheck", "lint", "test"] as const;
 
-/** `ci-vN` -> N; anything else -> NaN. */
+/** `ci-vN` -> N, `ci-vN.M` -> N (the major); anything else -> NaN. */
 export function templateNumber(ref: string): number {
-  const m = /^ci-v(\d+)$/.exec(ref.trim());
-  return m ? Number(m[1]) : Number.NaN;
+  return templateVersion(ref)?.[0] ?? Number.NaN;
+}
+
+/** `ci-vN` -> [N, 0], `ci-vN.M` -> [N, M] (ci-v9.1: point releases of a template); anything else -> null. */
+export function templateVersion(ref: string): [number, number] | null {
+  const m = /^ci-v(\d+)(?:\.(\d+))?$/.exec(ref.trim());
+  return m ? [Number(m[1]), Number(m[2] ?? 0)] : null;
 }
 
 /** D1/C56: a template ref below the minimum (or unparseable) is refused. */
 export function belowMinimum(ref: string, min: string): boolean {
-  const a = templateNumber(ref);
-  const b = templateNumber(min);
-  if (Number.isNaN(b)) throw new Error(`bad minimum template ref ${min}`);
-  return Number.isNaN(a) || a < b;
+  const a = templateVersion(ref);
+  const b = templateVersion(min);
+  if (!b) throw new Error(`bad minimum template ref ${min}`);
+  return !a || a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
 }
 
 function fail(msg: string): never {
@@ -266,7 +274,7 @@ export function versionFromTag(tag: string): string {
 export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("tealbrick-ci.json must be an object");
   const o = raw as Record<string, unknown>;
-  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images"]);
+  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres"]);
   for (const k of Object.keys(o)) if (!allowed.has(k)) throw new Error(`unknown field ${k}`);
   if (!KINDS.includes(o.kind as Kind)) throw new Error(`kind must be one of ${KINDS.join(", ")}`);
   const kind = o.kind as Kind;
@@ -275,6 +283,8 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     throw new Error("paths must be a non-empty list of relative paths");
   const conformance = o.conformance === undefined ? kind === "miniapp" || kind === "bridge" : o.conformance;
   if (typeof conformance !== "boolean") throw new Error("conformance must be boolean");
+  const postgres = o.postgres === undefined ? false : o.postgres;
+  if (typeof postgres !== "boolean") throw new Error("postgres must be boolean");
   const imagesRaw = o.images === undefined ? [] : o.images;
   if (!Array.isArray(imagesRaw)) throw new Error("images must be a list");
   const names = new Set<string>();
@@ -320,7 +330,7 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
       throw new Error(`service ${im.product}/${im.service} declared twice`);
   }
-  return { kind, paths, conformance, images };
+  return { kind, paths, conformance, images, postgres };
 }
 
 function safeRel(p: string): boolean {
@@ -416,6 +426,114 @@ export function tarballName(name: string, version: string): string {
 
 export function releaseUrl(repo: string, dir: string, name: string, version: string): string {
   return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${tarballName(name, version)}`;
+}
+
+/** ci-v9.1 (C75): the build that runs before `npm pack` on a package tag. The repo's root `build` script (the same one the
+ *  Woodpecker build stage runs), else the tagged package and its workspace dependencies. Args for `corepack`. */
+export function packageBuildArgs(rootScripts: Record<string, unknown>, target: string): string[] {
+  return typeof rootScripts.build === "string" ? ["pnpm", "run", "build"] : ["pnpm", "--filter", `${target}...`, "run", "--if-present", "build"];
+}
+
+/** ci-v9.1 (C75): the commands gh-build runs on a package tag before `package-pack`: frozen, script-free installs per pnpm path,
+ *  then the build. Before ci-v9.1 there was no build, so tarballs shipped without dist/. */
+export function packageReleaseCommands(
+  dirs: { dir: string; pm: "pnpm" | "npm" | null }[],
+  projectDir: string,
+  rootScripts: Record<string, unknown>,
+  target: string,
+): { cwd: string; cmd: string; args: string[] }[] {
+  const out = dirs
+    .filter((d) => d.pm === "pnpm")
+    .map((d) => ({ cwd: d.dir, cmd: "corepack", args: ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"] }));
+  out.push({ cwd: projectDir, cmd: "corepack", args: packageBuildArgs(rootScripts, target) });
+  return out;
+}
+
+/** ci-v9.1 pack guard: every file a package.json entry field points at (main, module, types, typings, bin, exports), relative to
+ *  the package root. Export wildcard patterns (`./schemas/*`) are returned as patterns. */
+export function packEntryTargets(pkg: Record<string, unknown>): string[] {
+  const out = new Set<string>();
+  const add = (v: unknown): void => {
+    if (typeof v === "string" && v.length > 0) out.add(v.replace(/^\.\//, ""));
+  };
+  for (const f of ["main", "module", "types", "typings"]) add(pkg[f]);
+  const bin = pkg.bin;
+  if (typeof bin === "string") add(bin);
+  else if (bin && typeof bin === "object") for (const v of Object.values(bin)) add(v);
+  const walk = (e: unknown): void => {
+    if (typeof e === "string") add(e);
+    else if (Array.isArray(e)) for (const x of e) walk(x);
+    else if (e && typeof e === "object") for (const v of Object.values(e)) walk(v);
+  };
+  walk(pkg.exports);
+  return [...out].sort();
+}
+
+/** Entry targets of `pkg` that are not in `files` (paths relative to the package root). A wildcard pattern needs one match;
+ *  an extension-less `main` resolves like Node (`x`, `x.js`, `x.json`, `x/index.js`). */
+export function missingPackTargets(pkg: Record<string, unknown>, files: Iterable<string>): string[] {
+  const have = new Set(files);
+  const list = [...have];
+  return packEntryTargets(pkg).filter((t) => {
+    if (t.includes("*")) {
+      const parts = t.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
+      const re = new RegExp(`^${parts.join(".+")}$`);
+      return !list.some((f) => re.test(f));
+    }
+    return ![t, `${t}.js`, `${t}.json`, `${t}/index.js`].some((c) => have.has(c));
+  });
+}
+
+/** Files of an npm-pack .tgz (ustar + pax/GNU long names), keyed by path relative to the package root (`package/` stripped). */
+export function tarEntries(tgz: Uint8Array): Map<string, Buffer> {
+  const buf = gunzipSync(tgz);
+  const out = new Map<string, Buffer>();
+  const str = (b: Buffer): string => b.toString("utf8").replace(/\0.*$/s, "");
+  let off = 0;
+  let longName: string | null = null;
+  while (off + 512 <= buf.length) {
+    const h = buf.subarray(off, off + 512);
+    if (h.every((x) => x === 0)) break;
+    const size = Number.parseInt(str(h.subarray(124, 136)).trim() || "0", 8);
+    const type = String.fromCharCode(h[156] || 48);
+    const body = buf.subarray(off + 512, off + 512 + size);
+    off += 512 + Math.ceil(size / 512) * 512;
+    if (type === "x") {
+      const m = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(body.toString("utf8"));
+      if (m) longName = m[1];
+      continue;
+    }
+    if (type === "L") {
+      longName = str(body);
+      continue;
+    }
+    if (type === "g") continue;
+    const prefix = str(h.subarray(257, 263)).startsWith("ustar") ? str(h.subarray(345, 500)) : "";
+    const name = longName ?? (prefix ? `${prefix}/${str(h.subarray(0, 100))}` : str(h.subarray(0, 100)));
+    longName = null;
+    if (type !== "0" && type !== "\0") continue; // regular files only
+    out.set(name.replace(/^[^/]+\//, ""), Buffer.from(body));
+  }
+  return out;
+}
+
+/** Problems of a packed package: no package.json, or entry targets (main/exports/types/bin) missing from the tarball (e.g. no dist/). */
+export function checkPackedTarball(tgz: Uint8Array): string[] {
+  const entries = tarEntries(tgz);
+  const pj = entries.get("package.json");
+  if (!pj) return ["the tarball has no package.json"];
+  const pkg = JSON.parse(pj.toString("utf8")) as Record<string, unknown>;
+  return missingPackTargets(pkg, entries.keys()).map((t) => `${String(pkg.name)}: ${t} is referenced by package.json but missing from the tarball`);
+}
+
+/** ci-v9.1: the unit step talks to the opt-in Postgres step (Woodpecker detached step `postgres`) only when tealbrick-ci.json asks. */
+export const PG_TEST_URL = "postgres://tb:tb-ci-only@postgres:5432/tb";
+export const PG_MARKER = ".tb-ci/postgres";
+export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = { ...env };
+  if (cfg.postgres) out.TB_TEST_DATABASE_URL = PG_TEST_URL;
+  else delete out.TB_TEST_DATABASE_URL;
+  return out;
 }
 
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
@@ -765,7 +883,13 @@ async function cmdSetup(): Promise<void> {
     }
   }
   const cfg = loadConfig(root);
-  log(`kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} images=${cfg.images.map((i) => i.name).join(",") || "-"}`);
+  log(
+    `kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} postgres=${cfg.postgres} images=${cfg.images.map((i) => i.name).join(",") || "-"}`,
+  );
+  // ci-v9.1: the template's detached `postgres` step starts the database only when this marker exists (opt-in)
+  mkdirSync(join(root, ".tb-ci"), { recursive: true });
+  if (cfg.postgres) writeFileSync(join(root, PG_MARKER), "requested by tealbrick-ci.json\n");
+  else rmSync(join(root, PG_MARKER), { force: true });
   const errors: string[] = [];
   const urls: string[] = [];
   for (const p of cfg.paths) {
@@ -835,7 +959,30 @@ function cmdInstall(): void {
   }
 }
 
-function cmdRun(script: string | undefined): void {
+/** Waits until host:port accepts TCP connections (the opt-in Postgres step boots while install/typecheck/lint run). */
+async function waitForTcp(host: string, port: number, timeoutMs: number): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const ok = await new Promise<boolean>((done) => {
+      const s = createConnection({ host, port });
+      s.setTimeout(2000);
+      s.once("connect", () => {
+        s.destroy();
+        done(true);
+      });
+      s.once("timeout", () => {
+        s.destroy();
+        done(false);
+      });
+      s.once("error", () => done(false));
+    });
+    if (ok) return;
+    if (Date.now() > until) fail(`postgres: ${host}:${port} not reachable after ${timeoutMs / 1000}s (tealbrick-ci.json postgres=true)`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+async function cmdRun(script: string | undefined): Promise<void> {
   if (!script || !["typecheck", "lint", "test", "conformance", "build"].includes(script)) fail("usage: run typecheck|lint|test|conformance|build");
   const root = repoRoot();
   const cfg = loadConfig(root);
@@ -848,6 +995,11 @@ function cmdRun(script: string | undefined): void {
     log(`SKIP ${script}: no package.json yet`);
     return;
   }
+  const env = script === "test" ? testEnv(cfg, process.env) : process.env;
+  if (script === "test" && cfg.postgres) {
+    await waitForTcp("postgres", 5432, 90_000);
+    log("postgres reachable; TB_TEST_DATABASE_URL is set");
+  }
   for (const p of paths) {
     const dir = join(root, p);
     const scripts = (readJson(join(dir, "package.json")).scripts ?? {}) as Record<string, string>;
@@ -858,8 +1010,8 @@ function cmdRun(script: string | undefined): void {
       }
       fail(`${p}: script "${script}" is missing`);
     }
-    if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "run", script], dir);
-    else sh("npm", ["run", script], dir);
+    if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "run", script], dir, env);
+    else sh("npm", ["run", script], dir, env);
   }
 }
 
@@ -998,10 +1150,11 @@ async function cmdGhBuild(): Promise<void> {
       parsed = null;
     }
     if (parsed && !(repo === PLATFORM_REPO && tag.startsWith("ci-v"))) {
-      for (const p of nodePaths(cfg, root)) {
-        const dir = join(root, p);
-        if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"], dir);
-      }
+      const target = packTarget(cfg, root, tag);
+      const rootScripts = (readJson(join(target.projectDir, "package.json")).scripts ?? {}) as Record<string, unknown>;
+      const dirs = nodePaths(cfg, root).map((p) => ({ dir: join(root, p), pm: packageManager(join(root, p)) }));
+      // ci-v9.1 (C75): install, then BUILD, then pack (still read-only token); the pack guard checks dist/ is in the tarball
+      for (const c of packageReleaseCommands(dirs, target.projectDir, rootScripts, target.name)) sh(c.cmd, c.args, c.cwd);
       await cmdPackagePack();
       for (const [name, data] of builtTarballs(join(root, ".tb-ci/pack"), PKG_NAME_RE)) writeFileSync(join(out, "assets", name), data);
     }
@@ -1715,16 +1868,8 @@ async function cmdPackagePack(): Promise<void> {
     log(`SKIP: ${tag} is a CI template tag, not a package release`);
     return;
   }
-  let parsed: { dir: string; version: string };
-  try {
-    parsed = parsePackageTag(tag);
-  } catch (e) {
-    fail((e as Error).message);
-  }
-  const all = cfg.paths.flatMap((p) => workspacePackages(join(root, p)).map((w) => ({ ...w, abs: join(root, p, w.rel) })));
-  const target = all.find((w) => w.dir === parsed.dir);
-  if (!target) fail(`no workspace package directory named ${parsed.dir} (tag ${tag})`);
-  if (target.version !== parsed.version) fail(`${target.rel}/package.json version ${target.version} != tag version ${parsed.version}`);
+  const target = packTarget(cfg, root, tag);
+  const all = target.all;
   // Rewrite in-repo workspace deps to their released tarball URLs; the release must exist.
   const pjPath = join(target.abs, "package.json");
   const original = readFileSync(pjPath, "utf8");
@@ -1750,7 +1895,31 @@ async function cmdPackagePack(): Promise<void> {
   } finally {
     writeFileSync(pjPath, original);
   }
-  log(`packed ${tarballName(target.name, target.version)} (upload runs in the next step)`);
+  const file = tarballName(target.name, target.version);
+  const problems = checkPackedTarball(readFileSync(join(outDir, file)));
+  if (problems.length) fail(`pack guard (ci-v9.1): ${file}\n  - ${problems.join("\n  - ")}\n  (was the package built before packing?)`);
+  log(`packed ${file}; pack guard OK (every main/exports/types/bin target is in the tarball); upload runs in the next step`);
+}
+
+interface PackTarget extends WsPackage {
+  abs: string; // package directory
+  projectDir: string; // the tealbrick-ci.json path (workspace root) that contains it
+  all: (WsPackage & { abs: string })[]; // every workspace package of every path
+}
+
+/** The workspace package a `<dir>-v<semver>` tag releases; its version must equal the tag version. */
+function packTarget(cfg: CiConfig, root: string, tag: string): PackTarget {
+  let parsed: { dir: string; version: string };
+  try {
+    parsed = parsePackageTag(tag);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const all = cfg.paths.flatMap((p) => workspacePackages(join(root, p)).map((w) => ({ ...w, abs: join(root, p, w.rel), projectDir: join(root, p) })));
+  const target = all.find((w) => w.dir === parsed.dir);
+  if (!target) fail(`no workspace package directory named ${parsed.dir} (tag ${tag})`);
+  if (target.version !== parsed.version) fail(`${target.rel}/package.json version ${target.version} != tag version ${parsed.version}`);
+  return { ...target, all };
 }
 
 function cmdAdopt(args: string[]): void {
