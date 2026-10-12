@@ -1,7 +1,7 @@
-# The signed release index envelope is a PUBLIC signed document (a JWS over a digest), not a credential.
+# The signed release index envelope and the Portal key-set statement are PUBLIC signed documents (JWS), not credentials.
 [extend]
 useDefault = true
 
 [[allowlists]]
-description = "public signed release index envelope"
-paths = ['''^registry/index\.jws$''']
+description = "public signed release index envelope and Portal key-set statement"
+paths = ['''^registry/index\.jws$''', '''^registry/portal-keyset\.jws$''']
