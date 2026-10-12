@@ -2,10 +2,7 @@
 //   WOODPECKER_URL=<server url> node ops/woodpecker-activate.ts
 // Reads tokens from files (never argv, never printed):
 //   ~/.config/opt2-tealbrick/woodpecker-token   Woodpecker personal access token (required)
-//   ~/.config/opt2-tealbrick/ghcr-token          GitHub PAT (write:packages, public_repo) -> secret ghcr_token
-//   ~/.config/opt2-tealbrick/release-key.pem     Ed25519 private key -> secret release_signing_key
-// Secrets (C67): per repo and per event, never org-level: ghcr_token only on releasing repos for tag events (+ platform
-// cron/manual for the signer); release_signing_key only on the platform repo for cron/manual. See ci/README.md.
+// Secrets (C72): Woodpecker holds none; the script deletes any org-level or repo secret it finds. See ci/README.md.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -65,20 +62,16 @@ for (const repo of REPOS) {
 
 // ---- Secrets (C67): NO org-level or global secrets. Each secret lives only on the repos that need it, for the
 // events that need it. Values come from 0600 files and are never printed.
-const RELEASING = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "knowledge", "connect", "samples"].map((n) => `opt2-tealbrick-${n}`);
+// C72: Woodpecker holds NO secrets at all. Image/kit/package publishing runs in each repo's GitHub Actions
+// workflow with the built-in GITHUB_TOKEN; the release signer runs in the platform repo's GitHub Actions
+// (environment "registry", secret RELEASE_SIGNING_KEY, main only). This script removes any Woodpecker secret.
 interface Want {
   repo: string;
   name: string;
   file: string;
   events: string[];
 }
-const WANT: Want[] = [
-  // product releases: image push, kit/package upload run only on tag events (C62 steps)
-  ...RELEASING.map((repo) => ({ repo, name: "ghcr_token", file: "ghcr-token", events: ["tag"] })),
-  // platform signer (registry-sync, SEC-03): cron + manual, platform repo only
-  { repo: "opt2-tealbrick-platform", name: "ghcr_token", file: "ghcr-token", events: ["cron", "manual"] },
-  { repo: "opt2-tealbrick-platform", name: "release_signing_key", file: "release-key.pem", events: ["cron", "manual"] },
-];
+const WANT: Want[] = [];
 
 const org = await wp("GET", `/orgs/lookup/${OWNER}`);
 if (org.status !== 200) throw new Error(`org lookup failed (HTTP ${org.status})`);

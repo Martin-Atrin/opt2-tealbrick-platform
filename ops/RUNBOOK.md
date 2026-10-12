@@ -11,7 +11,7 @@ Rules that always apply: never print secrets; copy values with `railway variable
 | GlitchTip heartbeat missed | "opt2 db-backup nightly" | last night's dump or restore test failed or did not run |
 | GlitchTip issues spike | projects opt2-portal-core, opt2-portal-gui | errors in Core or GUI (PII scrubbed server-side) |
 | Railway deploy failed / crash loop | Railway project opt2 → service → Deployments | health check (`/internal/health` Core, `/healthz` status) failing |
-| Woodpecker red | the Woodpecker UI (tailnet-only; URL in the operator notes) | CI; `template-audit` red = a repo below `ci/MIN_TEMPLATE`; `registry-sync` red = a release candidate was rejected |
+| Woodpecker red | the Woodpecker UI (tailnet-only; URL in the operator notes) | CI; `template-audit` red = a repo below `ci/MIN_TEMPLATE`; the platform `registry-sync` GitHub Actions run red = a release candidate was rejected |
 
 ## 2. Triage (first 10 minutes)
 1. Which probes are red on the status page? Core health red + API red → Core or Postgres. Only API red → gateway (portal-gui) config. Portal red → GUI deploy or DNS.
@@ -37,8 +37,8 @@ Customer workspaces: a bad app/bridge release is never edited in the index; publ
 | Core `TB_KEK` | portal-core variable | `ops/KEYS.md` "Portal Core KEK rotation" (C47): previous → new → deploy re-seals → drop previous |
 | Clerk DEV / Stripe TEST keys, webhook secret | portal-core variables | new key in the provider dashboard → save to a 0600 file → `railway variable set <KEY> --stdin` → deploy → revoke the old key |
 | Railway OAuth client secret | portal-core `RAILWAY_OAUTH_CLIENT_SECRET` | regenerate in Railway developer settings → `--stdin` → deploy |
-| Release signing key | platform repo Woodpecker secret `release_signing_key` + owner key store | `registry/README.md` "Key handling": add new public key to `registry/keys.json`, re-sign, update the secret, remove the old key later |
-| GitHub tokens (`ghcr_token`) | Woodpecker org secret | new PAT → `~/.config/opt2-tealbrick/ghcr-token` → `node ops/woodpecker-activate.ts` → revoke old PAT |
+| Release signing key | platform repo GitHub Actions environment `registry` secret `RELEASE_SIGNING_KEY` + owner key store (`gh secret set RELEASE_SIGNING_KEY --env registry < key.pem`) | `registry/README.md` "Key handling": add new public key to `registry/keys.json`, re-sign, update the secret, remove the old key later |
+| GitHub publishing | none: built-in `GITHUB_TOKEN` per workflow run (C72) | nothing to rotate |
 | Woodpecker repo hook token (leaked) | Woodpecker DB repo hash | new random repo hash on the CI host, then `POST /api/repos/<id>/repair`; check a test push triggers a pipeline (done for portal-core and website, 2026-10-12) |
 | GlitchTip DSN | portal-core/portal-gui `SENTRY_DSN` | new project key in GlitchTip → `--stdin` → deploy → disable the old key |
 After any rotation: record date + key id (never the value) in `ops/ROTATION-LOG.md`.

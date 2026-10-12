@@ -18,7 +18,6 @@ import {
   parsePackageTag,
   releaseUrl,
   renderImagesScript,
-  renderPushScript,
   sha512Integrity,
   skillsArchive,
   tarballName,
@@ -178,18 +177,12 @@ test("skills archive is sorted and complete", () => {
   assert.equal(skillsArchive({}, () => "").files.length, 0);
 });
 
-test("images script (C62): builds without credentials, tar on tags, never pushes", () => {
-  const none = renderImagesScript(validateConfig({ kind: "library" }, repo), repo);
-  assert.match(none, /nothing to build/);
+test("images script: check builds every image, never pushes, no credentials", () => {
+  assert.match(renderImagesScript(validateConfig({ kind: "library" }, repo), repo), /nothing to build/);
   const cfg = validateConfig({ kind: "miniapp", images: [{ name: repo, product: "knowledge", kind: "app", manifest: "m.json" }] }, repo);
   const s = renderImagesScript(cfg, repo);
   assert.match(s, /--no-push/);
-  assert.match(s, new RegExp(`--tar-path "\\$CI_WORKSPACE/.tb-ci/images/${repo}.tar"`));
-  assert.match(s, /org.opencontainers.image.revision=\$CI_COMMIT_SHA/);
-  assert.ok(
-    !/GHCR_TOKEN|config\.json|--destination[^\n]*sha-/.test(s.replace(/--destination "[^"]*:\$version"/g, "")),
-    "no credentials and no push in the kaniko script",
-  );
+  assert.ok(!/GHCR_TOKEN|config\.json|--destination|--tar-path/.test(s));
 });
 
 test("dependency rules: v1 names rejected, @opt2-tealbrick only via workspace or release URL", () => {
@@ -359,12 +352,4 @@ test("C62: Dockerfile installs must be frozen and script-free", () => {
   assert.match(dockerfileInstallProblems("FROM node\nRUN npm install express\n").join(), /npm install in an image build/);
   assert.match(dockerfileInstallProblems("FROM node\nRUN npm ci\n").join(), /npm ci without --ignore-scripts/);
   assert.deepEqual(dockerfileInstallProblems("FROM node\n# RUN npm install x\nRUN echo pnpm\n"), []);
-});
-
-test("C62: push script uses stdin for the token and only pushes this repo's images", () => {
-  const s = renderPushScript();
-  assert.match(s, /--password-stdin/);
-  assert.match(s, /unset GHCR_TOKEN/);
-  assert.match(s, /case "\$name" in "\$CI_REPO_NAME"\|"\$CI_REPO_NAME"-\*\)/);
-  assert.ok(!/-p "\$GHCR_TOKEN"/.test(s));
 });

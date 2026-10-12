@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v8)
+# opt2 CI standard (template ci-v9)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -22,22 +22,24 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
-| image-build | tag `v*`: kaniko builds each image to `.tb-ci/images/<name>.tar` with OCI labels (source, revision, version). No credentials (C62) | build fails |
-| push-prepare | tag `v*`: hash-checked runner (copied to /tmp) writes `.tb-ci/push.sh` | runner hash mismatch |
-| image-push | tag `v*`: crane pushes the tarballs to `ghcr.io/martin-atrin/<name>:<version>` + `:sha-<commit>`; the only step with `ghcr_token` for images; token via stdin | push fails, `ghcr_token` missing, a tarball not named after this repo |
+| (services) postgres | ephemeral Postgres 17 for every pipeline; tests that want a real database read `TB_TEST_DATABASE_URL` and skip when it is unset | — |
 | release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62) | invalid manifest, version mismatch, any token in the environment |
-| kit-build / kit-upload | tag `v*`, miniapp: `tb-gen kit --build` WITHOUT a token, then the hash-checked runner uploads `<product>-kit-<ver>.tgz` + `.sha256` (BSA-03, C62) | kit build fails, `ghcr_token` missing |
-| package-pack / package-upload | tag `<package>-v<semver>`: `npm pack --ignore-scripts` WITHOUT a token, then the hash-checked runner uploads the tarball + `.sha256` | version mismatch, an in-repo dependency not released yet |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
 
-## Release signing (SEC-03, C59)
-Product pipelines never see the release signing key and no longer write anything for the index. The platform repo's `registry-sync` pipeline (Woodpecker cron, every 15 min, plus manual) is the only CI job that holds `release_signing_key` (a platform-repo secret, events cron/manual). It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). It discovers new `v*` tags in the opt2 repos, reads `tealbrick-ci.json` at the tag commit and resolves each declared image's `:<version>` digest in ghcr (tags without published images stay pending). For each release it:
-1. checks the tag points at the candidate's commit;
+## Release publishing (C72): GitHub Actions, no personal token
+Every releasing repo (images, miniapp kit, or package tarballs) carries `.github/workflows/opt2-release.yml`, a byte-identical copy of `ci/github/opt2-release.yml` (setup fails on drift; `adopt` writes it). It runs on `v*` and `<pkg>-v*` tags only:
+1. `build` job — `permissions: contents: read`. Fetches the hash-checked runner, then `tb-ci gh-build`: `docker build` each declared image from the tagged commit with OCI labels (source, revision, version) and saves it to a tarball; builds the miniapp kit (`tb-gen kit --build`) or packs the tagged workspace package (`npm pack --ignore-scripts`). Installs use `--frozen-lockfile --ignore-scripts`. No write token exists in this job.
+2. `publish` job — `permissions: packages: write, contents: write`, built-in `GITHUB_TOKEN`. Runs NO repo code: loads the image tarballs, pushes `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>`, prints the digest (information only), attaches kit/package tarballs + `.sha256` to the GitHub release.
+Actions are pinned by full commit SHA and limited to the official actions/checkout, setup-node, upload-artifact and download-artifact. Woodpecker keeps every other stage and holds no secrets.
+
+## Release signing (SEC-03, C72)
+Product pipelines never see the release signing key and write nothing for the index. The platform repo's `.github/workflows/registry-sync.yml` (GitHub Actions, every 15 min + manual, main only, environment `registry` restricted to `main`, secret `RELEASE_SIGNING_KEY`) is the only job that holds the key. It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). It discovers new `v*` tags in the opt2 repos, reads `tealbrick-ci.json` at the tag commit and resolves each declared image's `:<version>` digest in ghcr anonymously (tags without published images stay pending; packages must be PUBLIC). For each release it:
+1. checks the tag points at the commit;
 2. re-reads the manifest, skill files and bridge runtime from the repo AT that commit (as data) and re-derives `manifestDigest`, `skillsDigest`, the runtime record;
 3. checks the service images equal the manifest services that have `build`;
-4. checks every image digest exists in ghcr and its OCI labels say `revision = <commit>` and `source = https://github.com/<repo>`;
-5. then adds the entry and signs the index. Any rejected candidate turns the pipeline red with the reason.
+4. checks every image's OCI labels say `revision = <commit>` and `source = https://github.com/<repo>`;
+5. then adds the entry and signs the index, committing with the built-in `GITHUB_TOKEN`. Any rejected candidate turns the run red with the reason.
 
 ## Dependency integrity (S3/C59, C62/BSD-10)
 - Every GitHub-release tarball in a lockfile carries `integrity` IN THE LOCKFILE, so pnpm/npm verify it on every install, also inside Docker builds. npm lockfiles have it; for pnpm run `node ci/tb-ci.ts pin-tarballs ../opt2-tealbrick-<name>` after each dependency change: it writes `resolution: {integrity: sha512-…, tarball: …}` into `pnpm-lock.yaml` (pnpm keeps it and fails with ERR_PNPM_TARBALL_INTEGRITY on a mismatch). Setup downloads each tarball and fails if integrity is missing or wrong. `tealbrick-integrity.json` is retired.
@@ -90,14 +92,10 @@ Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
 Releases are immutable: the same version with another image digest is rejected. See `registry/README.md`.
 
-## Woodpecker secrets (C67: per repo, per event; no org-level or global secrets)
-| Secret | Repos | Events | Used by |
-|---|---|---|---|
-| `ghcr_token` | releasing repos only: specs, sdk, bridge, packages, portal-core, portal-gui, knowledge, connect, samples | `tag` | image-push (crane), kit-upload, package-upload |
-| `ghcr_token` | opt2-tealbrick-platform | `cron`, `manual` | registry-sync (commit the signed index) |
-| `release_signing_key` | opt2-tealbrick-platform only | `cron`, `manual` | registry-sync (SEC-03) |
-No secret is available to `push` or `pull_request` pipelines anywhere. website, tbd and qa hold no secrets (website deploys via `ops/railway-deploy.ts`; TBD releases are signed on the release Mac). `node ops/woodpecker-activate.ts` enforces this table: it deletes org-level secrets and any repo secret not in the table, and sets values from 0600 files without printing them. Webhook tokens are never printed; rotate a leaked one per RUNBOOK §4.
-Known effect until Martin's ghcr token exists: tag pipelines of releasing repos and manual/cron runs of the platform signer error with `secret "ghcr_token" not found`.
+## Secrets (C72)
+- Woodpecker: NONE (no org, repo or global secret). `node ops/woodpecker-activate.ts` deletes any it finds.
+- GitHub Actions: product repos use only the built-in `GITHUB_TOKEN` (per-job permissions). The platform repo holds `RELEASE_SIGNING_KEY` in the environment `registry` (deployments from `main` only), used by registry-sync.
+- No personal token exists anywhere. Webhook tokens are never printed; rotate a leaked one per RUNBOOK §4.
 
 ## Clean-up and the shared host
 kaniko builds inside the step container: no host daemon images, no host socket, no privileged step.

@@ -1,0 +1,35 @@
+# Platform release signer (SEC-03, C72). The ONLY place the release signing key is used.
+# Runs platform code only; its one dependency (@opt2-tealbrick/manifest) installs from the integrity-pinned
+# ops/signer/package-lock.json with --ignore-scripts. Discovers v* tags in the opt2 repos, resolves image digests
+# in ghcr (anonymous pulls: packages must be public), re-derives manifest/skills/runtime from the tag commit,
+# checks image provenance labels, then commits + publishes the signed index with the built-in GITHUB_TOKEN.
+name: registry-sync
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+permissions: {}
+concurrency:
+  group: registry-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: registry
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.11.1"
+      - run: npm ci --prefix ops/signer --ignore-scripts --no-audit --no-fund
+      - name: registry-sync
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          TB_MANIFEST_MODULE: ops/signer/node_modules/@opt2-tealbrick/manifest/dist/index.js
+        run: node ci/tb-ci.ts registry-sync
