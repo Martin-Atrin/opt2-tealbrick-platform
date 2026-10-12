@@ -1,11 +1,11 @@
-# opt2 CI standard (template ci-v6)
+# opt2 CI standard (template ci-v7)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
 `setup` step fails when the copy drifts, when `tealbrick-ci.json` is invalid, or when package rules are broken.
 
 ## Enforcement (C56 D1)
-- `ci/MIN_TEMPLATE` on platform `main` holds the minimum template ref (now `ci-v6`). From ci-v6 on, `setup` fails when the repo's template is below it, so raising the file forces every repo to re-adopt.
+- `ci/MIN_TEMPLATE` on platform `main` holds the minimum template ref (now `ci-v7`). From ci-v6 on, `setup` fails when the repo's template is below it, so raising the file forces every repo to re-adopt.
 - Repos still on a template older than ci-v6 (which has no such check) are caught by the platform's daily `template-audit` pipeline (`node ci/tb-ci.ts audit-templates`): it goes red and names them.
 - One template for every repo. Kinds: `library`, `service`, `miniapp`, `bridge`, `portal`, `web`, `static` (static site, e.g. the website: node stages + build, no images), `desktop` (TBD: `paths` = the TypeScript projects, e.g. `["chat"]`), `specs`, `tests`.
 - Written exemption, desktop: the macOS/Swift build, signing and notarization cannot run on the Linux CI host. They run on the release Mac (`scripts/release.sh` in opt2-tealbrick-tbd); the release enters the index only through `registry-add-desktop`, which checks the artifact sha256. Secret scan, typecheck, lint, unit and build of the TypeScript parts run in this template like everywhere else. A repo-specific `.woodpecker/*.yml` that repeats these stages (e.g. the old `chat.yml`) must be deleted.
@@ -23,11 +23,22 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
 | image-publish | tag `v*` only: push `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>` | build/push fails, `ghcr_token` missing |
-| release-record | tag `v*` only: manifest validated + digested with `@opt2-tealbrick/manifest` (pinned `TB_MANIFEST_PKG`), manifest + skills archive as release assets, entry added to the signed release index | signing key missing, invalid manifest, version mismatch, immutability conflict |
+| release-record | tag `v*` only: attaches `release-candidate.json` (product, version, image + service image digests, manifest/runtime paths) to the GitHub release. It holds NO signing key (SEC-03) | invalid manifest, version mismatch, service images ≠ manifest services, a signing key present in the environment |
 | kit-release | tag `v*`, kind miniapp: `tb-gen kit --build` → `<product>-kit-<ver>.tgz` + `.sha256` attached to the GitHub release (BSA-03) | kit build fails, `ghcr_token` missing |
 | package-release | tag `<package>-v<semver>` only: `npm pack` of `packages/<package>` -> tarball + `.sha256` on the GitHub release | version mismatch, an in-repo dependency not released yet |
 
 Paths without `package.json` skip the node stages with a warning (fresh scaffolds stay green).
+
+## Release signing (SEC-03, C59)
+Product pipelines never see the release signing key. The platform repo's `registry-sync` pipeline (Woodpecker cron, every 15 min, plus manual) is the only CI job that holds `release_signing_key` (a platform-repo secret, events cron/manual). It runs platform code only; its one dependency, `@opt2-tealbrick/manifest`, is installed from `ops/signer/package-lock.json` (integrity-pinned, `--ignore-scripts`). For each new `release-candidate.json` it:
+1. checks the tag points at the candidate's commit;
+2. re-reads the manifest, skill files and bridge runtime from the repo AT that commit (as data) and re-derives `manifestDigest`, `skillsDigest`, the runtime record;
+3. checks the service images equal the manifest services that have `build`;
+4. checks every image digest exists in ghcr and its OCI labels say `revision = <commit>` and `source = https://github.com/<repo>`;
+5. then adds the entry and signs the index. Any rejected candidate turns the pipeline red with the reason.
+
+## Dependency integrity (S3, C59)
+Every GitHub-release tarball in a lockfile needs integrity: npm lockfiles carry it themselves; pnpm lockfiles do not record it for URL tarballs, so such repos commit `tealbrick-integrity.json` (`{url: "sha512-…"}`), written by `node ci/tb-ci.ts pin-tarballs ../opt2-tealbrick-<name>` after each dependency change. Setup downloads each pinned tarball and fails on a missing pin, a mismatch or a stale pin.
 
 ## Package rules (enforced by setup)
 - Every `package.json` (root and workspace packages) has `"private": true` and no `publishConfig` (no npm publishing in opt2).
@@ -75,9 +86,9 @@ Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
 Releases are immutable: the same version with another image digest is rejected. See `registry/README.md`.
 
-## Woodpecker secrets (owner: Martin-Atrin, org-level, events push/tag/manual only, never pull_request)
-- `ghcr_token`: GitHub classic PAT with `write:packages` + `public_repo` (image push, release assets, registry commit).
-- `release_signing_key`: Ed25519 private key (PKCS#8 PEM). Public key: `registry/release-key.pub.pem`.
+## Woodpecker secrets
+- `ghcr_token` (org-level, owner Martin-Atrin, events push/tag/manual, never pull_request): GitHub classic PAT with `write:packages` + `public_repo` (image push, release assets, registry commit).
+- `release_signing_key` (REPO-level on opt2-tealbrick-platform ONLY, events cron/manual): Ed25519 private key (PKCS#8 PEM). Public keys: `registry/keys.json`. Never an org secret (SEC-03).
 
 ## Clean-up and the shared host
 kaniko builds inside the step container: no host daemon images, no host socket, no privileged step.

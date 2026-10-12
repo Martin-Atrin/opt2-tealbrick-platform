@@ -33,3 +33,4 @@ secrets/
 
 # opt2 CI runner scratch
 .tb-ci/
+ops/signer/node_modules/

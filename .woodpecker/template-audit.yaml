@@ -1,6 +1,8 @@
 # C56 D1: daily check that every opt2 repo uses a template >= ci/MIN_TEMPLATE. Red = some repo must re-adopt.
 when:
-  - event: [cron, manual]
+  - event: cron
+    cron: template-audit
+  - event: manual
 
 steps:
   - name: template-audit

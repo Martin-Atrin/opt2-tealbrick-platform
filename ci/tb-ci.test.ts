@@ -9,17 +9,20 @@ import {
   dockerfileVolumeLines,
   expectedGenFiles,
   type IndexRelease,
+  lockfileTarballs,
   mergeIndex,
   newId,
   parsePackageTag,
   releaseUrl,
   renderImagesScript,
+  sha512Integrity,
   skillsArchive,
   tarballName,
   validateBridgeRuntime,
   validateConfig,
   validateHarnesses,
   validateOffers,
+  verifyImageProvenance,
   versionFromTag,
   workspaceGlobs,
 } from "./tb-ci.ts";
@@ -286,4 +289,41 @@ test("D1: minimum template ref", () => {
   assert.equal(belowMinimum("none", "ci-v6"), true);
   assert.equal(belowMinimum("main", "ci-v6"), true);
   assert.throws(() => belowMinimum("ci-v6", "v6"), /bad minimum/);
+});
+
+test("S3: lockfile tarball integrity detection", () => {
+  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
+  const pnpm = `packages:\n  '@opt2-tealbrick/manifest@${url}':\n    resolution: {tarball: ${url}}\n    version: 0.1.3\n  ajv@8.17.1:\n    resolution: {integrity: sha512-abc}\n`;
+  assert.deepEqual(lockfileTarballs(pnpm, "pnpm"), [{ url, integrity: null }]);
+  const pnpmInt = pnpm.replace(`{tarball: ${url}}`, `{integrity: sha512-xyz, tarball: ${url}}`);
+  assert.deepEqual(lockfileTarballs(pnpmInt, "pnpm"), [{ url, integrity: "sha512-xyz" }]);
+  const npm = JSON.stringify({
+    packages: {
+      "node_modules/@opt2-tealbrick/manifest": { resolved: url, integrity: "sha512-q" },
+      "node_modules/ajv": { resolved: "https://registry.npmjs.org/ajv/-/ajv-8.17.1.tgz", integrity: "sha512-r" },
+    },
+  });
+  assert.deepEqual(lockfileTarballs(npm, "npm"), [{ url, integrity: "sha512-q" }]);
+  assert.match(sha512Integrity(new TextEncoder().encode("x")), /^sha512-[A-Za-z0-9+/]+=*$/);
+});
+
+test("SEC-03: image provenance check binds image to repo + commit", async () => {
+  const commit = "c".repeat(40);
+  const fake = (labels: Record<string, string>): typeof fetch =>
+    (async (u: string | URL | Request) => {
+      const s = String(u);
+      if (s.includes("/token?")) return new Response(JSON.stringify({ token: "t" }));
+      if (s.includes("/manifests/")) return new Response(JSON.stringify({ config: { digest: `sha256:${"e".repeat(64)}` } }));
+      if (s.includes("/blobs/")) return new Response(JSON.stringify({ config: { Labels: labels } }));
+      return new Response("", { status: 404 });
+    }) as typeof fetch;
+  const ref = `ghcr.io/martin-atrin/${repo}-gbrain@sha256:${"a".repeat(64)}`;
+  const good = { "org.opencontainers.image.revision": commit, "org.opencontainers.image.source": `https://github.com/Martin-Atrin/${repo}` };
+  assert.equal(await verifyImageProvenance(ref, `Martin-Atrin/${repo}`, commit, fake(good)), null);
+  assert.match(
+    String(await verifyImageProvenance(ref, `Martin-Atrin/${repo}`, commit, fake({ ...good, "org.opencontainers.image.revision": "d".repeat(40) }))),
+    /revision label/,
+  );
+  assert.match(String(await verifyImageProvenance(ref, "Martin-Atrin/opt2-tealbrick-connect", commit, fake(good))), /does not belong/);
+  assert.match(String(await verifyImageProvenance("ghcr.io/evil/x@sha256:1", `Martin-Atrin/${repo}`, commit, fake(good))), /bad image ref/);
 });

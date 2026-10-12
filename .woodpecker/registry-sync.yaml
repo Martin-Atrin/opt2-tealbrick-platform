@@ -1,0 +1,21 @@
+# SEC-03 (C59): the ONLY place the release signing key is used in CI.
+# Runs platform code only: no product repo code, no product dependencies, no install scripts.
+# It reads release candidates from product GitHub releases as DATA, re-derives every digest from the repo at the tag
+# commit, checks each image's provenance labels in ghcr, then signs and publishes the release index.
+when:
+  - event: cron
+    cron: registry-sync
+  - event: manual
+
+steps:
+  - name: registry-sync
+    image: node:24.21.0-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0
+    environment:
+      GITHUB_TOKEN:
+        from_secret: ghcr_token
+      RELEASE_SIGNING_KEY:
+        from_secret: release_signing_key
+      TB_MANIFEST_MODULE: ops/signer/node_modules/@opt2-tealbrick/manifest/dist/index.js
+    commands:
+      - npm ci --prefix ops/signer --ignore-scripts --no-audit --no-fund
+      - node ci/tb-ci.ts registry-sync

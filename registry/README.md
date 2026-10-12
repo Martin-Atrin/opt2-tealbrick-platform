@@ -53,7 +53,7 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
 - Offers: $99 per app per major, no bundles (C29). `stripePrice.test` is used in opt2 (Stripe TEST); `live` stays null until cutover. Core verifies each price against Stripe at sync (active, one-time, amount, currency, tax behaviour, livemode).
 
 ## Writers (only these)
-- CI `release-record` step on `v*` tags (app/bridge images; needs `ghcr_token`, `release_signing_key`).
+- The platform `registry-sync` pipeline (cron + manual; the only CI job with `release_signing_key`), from `release-candidate.json` assets that product `v*` tag pipelines attach. It re-derives every digest from the repo at the tag commit and checks image provenance in ghcr before signing (SEC-03; see ci/README.md).
 - `node ci/tb-ci.ts registry-add-source --product <id> --kind app|bridge --repo opt2-tealbrick-<x> --ref <sha> --dockerfile <path> --version <semver> [--manifest tealbrick.manifest.json | --runtime registry/inputs/bridge-runtime-<v>.json]` (C29 interim; always channel dev).
 - `node ci/tb-ci.ts registry-add-desktop --product tbd --version <semver> --url <GitHub release asset> --sha256 <hex> [--min-os 14.0]` (TBD release Mac; downloads and checks the sha256 first).
 - `node ci/tb-ci.ts registry-sign` (offers changed / re-sign).

@@ -8,7 +8,9 @@
 //   kit-release                 (tag v*, miniapp) tb-gen kit --build -> kit tarball + sha256 on the GitHub release
 //   audit-templates             (platform cron) every opt2 repo's template ref >= ci/MIN_TEMPLATE
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
-//   release-record              (tag v*) release entries (app|bridge) -> GitHub release assets + signed release index
+//   release-record              (tag v*) release candidate (image digests) -> GitHub release asset; NO signing key (SEC-03)
+//   registry-sync               (platform signer pipeline only) verify candidates independently, index + sign
+//   pin-tarballs [<repoDir>]    (local) pin sha512 of GitHub-release tarballs the lockfile has no integrity for (S3)
 //   package-release             (tag <pkg>-v*) npm pack one workspace package -> GitHub release tarball
 //   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
@@ -497,6 +499,82 @@ export function validateOffers(raw: unknown): Offer[] {
   });
 }
 
+export const INTEGRITY_FILE = "tealbrick-integrity.json";
+const GH_RELEASE_TARBALL = /https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/releases\/download\/[^\s'"}]+\.tgz/g;
+
+/** S3 (C59): GitHub-release tarballs in a lockfile and whether the lockfile itself carries integrity for them. */
+export function lockfileTarballs(lockText: string, kind: "pnpm" | "npm"): { url: string; integrity: string | null }[] {
+  const out = new Map<string, string | null>();
+  if (kind === "npm") {
+    const lock = JSON.parse(lockText) as { packages?: Record<string, { resolved?: string; integrity?: string }> };
+    for (const v of Object.values(lock.packages ?? {})) {
+      if (v.resolved && /\/releases\/download\/.+\.tgz$/.test(v.resolved)) out.set(v.resolved, v.integrity ?? out.get(v.resolved) ?? null);
+    }
+  } else {
+    for (const line of lockText.split("\n")) {
+      const m = /resolution:\s*\{([^}]*)\}/.exec(line);
+      if (!m) continue;
+      const tarball = /tarball:\s*([^,\s}]+)/.exec(m[1])?.[1];
+      if (!tarball || !/\/releases\/download\/.+\.tgz$/.test(tarball)) continue;
+      out.set(tarball, /integrity:\s*([^,\s}]+)/.exec(m[1])?.[1] ?? null);
+    }
+  }
+  return [...out].map(([url, integrity]) => ({ url, integrity }));
+}
+
+export function sha512Integrity(data: Uint8Array): string {
+  return `sha512-${createHash("sha512").update(data).digest("base64")}`;
+}
+
+/** Returns problems: every release tarball needs integrity in the lockfile or a matching pin in tealbrick-integrity.json. */
+async function checkTarballIntegrity(dir: string, where: string): Promise<string[]> {
+  const pm = packageManager(dir);
+  if (!pm) return [];
+  const lockText = readFileSync(join(dir, pm === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json"), "utf8");
+  const entries = lockfileTarballs(lockText, pm);
+  const pinsPath = join(dir, INTEGRITY_FILE);
+  const pins = existsSync(pinsPath) ? (JSON.parse(readFileSync(pinsPath, "utf8")) as Record<string, string>) : {};
+  const errs: string[] = [];
+  for (const e of entries) {
+    if (e.integrity) continue; // the package manager verifies it on install
+    const pin = pins[e.url];
+    if (!pin) {
+      errs.push(`${where}: ${e.url} has no integrity in the lockfile and no pin in ${INTEGRITY_FILE} (run: node ci/tb-ci.ts pin-tarballs <repo>)`);
+      continue;
+    }
+    const res = await fetch(e.url, { redirect: "follow" });
+    if (!res.ok) {
+      errs.push(`${where}: ${e.url} HTTP ${res.status}`);
+      continue;
+    }
+    const got = sha512Integrity(new Uint8Array(await res.arrayBuffer()));
+    if (got !== pin) errs.push(`${where}: ${e.url} does not match its pinned integrity (tarball changed after pinning)`);
+  }
+  for (const url of Object.keys(pins)) if (!entries.some((e) => e.url === url)) errs.push(`${where}: stale pin ${url} (not in the lockfile)`);
+  return errs;
+}
+
+/** (local) write tealbrick-integrity.json for every release tarball the lockfile does not already carry integrity for. */
+async function cmdPinTarballs(args: string[]): Promise<void> {
+  const dir = resolve(args[0] ?? ".");
+  const pm = packageManager(dir);
+  if (!pm) fail(`${dir}: no lockfile`);
+  const entries = lockfileTarballs(readFileSync(join(dir, pm === "pnpm" ? "pnpm-lock.yaml" : "package-lock.json"), "utf8"), pm).filter((e) => !e.integrity);
+  const pins: Record<string, string> = {};
+  for (const e of entries.sort((a, b) => a.url.localeCompare(b.url))) {
+    const res = await fetch(e.url, { redirect: "follow" });
+    if (!res.ok) fail(`${e.url}: HTTP ${res.status}`);
+    pins[e.url] = sha512Integrity(new Uint8Array(await res.arrayBuffer()));
+  }
+  if (entries.length === 0) {
+    rmSync(join(dir, INTEGRITY_FILE), { force: true });
+    log("lockfile carries integrity for every release tarball; no pin file needed");
+    return;
+  }
+  writeFileSync(join(dir, INTEGRITY_FILE), `${JSON.stringify(pins, null, 2)}\n`);
+  log(`pinned ${entries.length} release tarball(s) in ${INTEGRITY_FILE}; commit it`);
+}
+
 /** C42: Railway refuses images with a `VOLUME` instruction (it mounts volumes itself). Returns offending line numbers. */
 export function dockerfileVolumeLines(text: string): number[] {
   const out: number[] = [];
@@ -684,6 +762,7 @@ async function cmdSetup(): Promise<void> {
     const res = await fetch(u, { method: "HEAD", redirect: "follow" });
     if (!res.ok) errors.push(`dependency tarball not found (HTTP ${res.status}): ${u}`);
   }
+  for (const p of cfg.paths) if (existsSync(join(root, p, "package.json"))) errors.push(...(await checkTarballIntegrity(join(root, p), p)));
   if (errors.length) fail(`\n  - ${errors.join("\n  - ")}`);
   log("setup OK");
 }
@@ -980,6 +1059,28 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
   fail("registry: could not fast-forward main after 5 attempts");
 }
 
+/** SEC-03 (C59): what a product tag pipeline may claim. It holds NO signature and no derived digests the signer trusts:
+ *  the platform signer re-derives manifest/skills/runtime from the repo at `commit` and checks every image in the registry. */
+export interface ReleaseCandidate {
+  product: string;
+  kind: "app" | "bridge";
+  version: string;
+  image: string; // ghcr.io/martin-atrin/<name>@sha256:<hex>
+  services: { id: string; image: string }[];
+  manifest: string | null; // repo-relative manifest path (apps)
+  runtimeFile: string | null; // repo-relative bridge-runtime.json (bridge)
+  upgradeFrom: string;
+}
+export interface ReleaseCandidateDoc {
+  schema: "opt2.release-candidate/v1";
+  repo: string; // owner/name
+  tag: string;
+  commit: string;
+  candidates: ReleaseCandidate[];
+}
+export const CANDIDATE_ASSET = "release-candidate.json";
+
+/** Product tag pipeline: describe the release (image digests from image-publish) as a GitHub release asset. No signing key here. */
 async function cmdReleaseRecord(): Promise<void> {
   const root = repoRoot();
   const cfg = loadConfig(root);
@@ -987,6 +1088,7 @@ async function cmdReleaseRecord(): Promise<void> {
   const tag = process.env.CI_COMMIT_TAG;
   const commit = process.env.CI_COMMIT_SHA;
   if (!tag || !commit) fail("release-record runs on tag events only (CI_COMMIT_TAG, CI_COMMIT_SHA)");
+  if (process.env.RELEASE_SIGNING_KEY || process.env.RELEASE_SIGNING_KEY_FILE) fail("SEC-03: product pipelines must not hold the release signing key");
   let version: string;
   try {
     version = versionFromTag(tag);
@@ -995,84 +1097,212 @@ async function cmdReleaseRecord(): Promise<void> {
   }
   const entries = cfg.images.filter((im) => im.kind === "app" || im.kind === "bridge");
   if (entries.length === 0) {
-    log("no app/bridge images declared: no release-index entry");
+    log("no app/bridge images declared: no release candidate");
     return;
   }
-  const m = await loadManifestPkg(root);
-  const channel = channelForVersion(version);
-  const now = new Date().toISOString();
-  const releaseId = await ensureRelease(repo, tag, channel !== "stable");
-  const add: IndexRelease[] = [];
-  for (const im of entries) {
-    const dfile = join(root, ".tb-ci/digests", `${im.name}.digest`);
-    if (!existsSync(dfile)) fail(`digest for ${im.name} missing (image-publish must run first)`);
-    const imageDigest = readFileSync(dfile, "utf8").trim();
-    if (!/^sha256:[0-9a-f]{64}$/.test(imageDigest)) fail(`bad digest for ${im.name}`);
-    let manifestDigest: string | null = null;
-    let manifestUrl: string | null = null;
-    let skillsDigest: string | null = null;
+  const m = await loadManifestPkg(root); // early validation only; the signer re-checks
+  const digestOf = (name: string): string => {
+    const f = join(root, ".tb-ci/digests", `${name}.digest`);
+    if (!existsSync(f)) fail(`digest for ${name} missing (image-publish must run first)`);
+    const d = readFileSync(f, "utf8").trim();
+    if (!/^sha256:[0-9a-f]{64}$/.test(d)) fail(`bad digest for ${name}`);
+    return d;
+  };
+  const candidates: ReleaseCandidate[] = entries.map((im) => {
     if (im.manifest) {
-      const text = readFileSync(join(root, im.manifest), "utf8");
-      const v = m.validateManifest(JSON.parse(text));
+      const v = m.validateManifest(JSON.parse(readFileSync(join(root, im.manifest), "utf8")));
       if (!v.ok) fail(`${im.manifest} is invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
+      const man = v.manifest as { id?: string; version?: string; runtime?: { services?: { id: string; build?: unknown }[] } };
+      if (man.id !== im.product || man.version !== version) fail(`manifest ${man.id}@${man.version} != ${im.product}@${version}`);
+      const svcErrs = checkServiceImages(cfg, im.product, man.runtime?.services ?? []);
+      if (svcErrs.length) fail(svcErrs.join("; "));
+    }
+    const runtimeFile = im.kind === "bridge" ? `${dirname(im.dockerfile)}/bridge-runtime.json` : null;
+    if (runtimeFile) validateBridgeRuntime(JSON.parse(readFileSync(join(root, runtimeFile), "utf8")));
+    return {
+      product: im.product,
+      kind: im.kind === "bridge" ? "bridge" : "app",
+      version,
+      image: `${IMAGE_NAMESPACE}/${im.name}@${digestOf(im.name)}`,
+      services: cfg.images
+        .filter((x) => x.kind === "service" && x.product === im.product)
+        .map((x) => ({ id: x.service as string, image: `${IMAGE_NAMESPACE}/${x.name}@${digestOf(x.name)}` }))
+        .sort((x, y) => x.id.localeCompare(y.id)),
+      manifest: im.manifest ?? null,
+      runtimeFile,
+      upgradeFrom: im.upgradeFrom,
+    };
+  });
+  const doc: ReleaseCandidateDoc = { schema: "opt2.release-candidate/v1", repo: `${OWNER}/${repo}`, tag, commit, candidates };
+  const releaseId = await ensureRelease(repo, tag, channelForVersion(version) !== "stable");
+  await uploadAsset(repo, releaseId, CANDIDATE_ASSET, `${JSON.stringify(doc, null, 2)}\n`);
+  log(`release candidate for ${candidates.map((c) => `${c.product}@${c.version}`).join(", ")} attached; the platform signer verifies and indexes it`);
+}
+
+// ---------- platform signer (SEC-03): runs only platform code, never product repo or dependency code ----------
+
+const GHCR_ACCEPT = [
+  "application/vnd.oci.image.index.v1+json",
+  "application/vnd.oci.image.manifest.v1+json",
+  "application/vnd.docker.distribution.manifest.list.v2+json",
+  "application/vnd.docker.distribution.manifest.v2+json",
+].join(", ");
+
+/** Checks a public ghcr image by digest: it exists and its OCI labels bind it to this repo + commit. */
+export async function verifyImageProvenance(ref: string, repo: string, commit: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+  const m = /^ghcr\.io\/(martin-atrin\/[a-z0-9-]+)@(sha256:[0-9a-f]{64})$/.exec(ref);
+  if (!m) return `bad image ref ${ref}`;
+  const [, name, digest] = m;
+  if (!name.endsWith(`/${repo.split("/")[1]}`) && !name.slice("martin-atrin/".length).startsWith(`${repo.split("/")[1]}-`))
+    return `${ref}: image name does not belong to ${repo}`;
+  const tokRes = await fetcher(`https://ghcr.io/token?scope=repository:${name}:pull`);
+  if (!tokRes.ok) return `${ref}: no pull token (package private?) HTTP ${tokRes.status}`;
+  const token = ((await tokRes.json()) as { token: string }).token;
+  const get = (path: string, accept = GHCR_ACCEPT) => fetcher(`https://ghcr.io/v2/${name}/${path}`, { headers: { authorization: `Bearer ${token}`, accept } });
+  let res = await get(`manifests/${digest}`);
+  if (!res.ok) return `${ref}: manifest not found HTTP ${res.status}`;
+  let man = (await res.json()) as {
+    mediaType?: string;
+    manifests?: { digest: string; platform?: { os: string; architecture: string } }[];
+    config?: { digest: string };
+  };
+  if (man.manifests) {
+    const amd = man.manifests.find((x) => x.platform?.os === "linux" && x.platform?.architecture === "amd64");
+    if (!amd) return `${ref}: no linux/amd64 image in the index`;
+    res = await get(`manifests/${amd.digest}`);
+    if (!res.ok) return `${ref}: platform manifest HTTP ${res.status}`;
+    man = await res.json();
+  }
+  if (!man.config?.digest) return `${ref}: manifest has no config`;
+  const cfgRes = await get(`blobs/${man.config.digest}`, "*/*");
+  if (!cfgRes.ok) return `${ref}: config blob HTTP ${cfgRes.status}`;
+  const labels = ((await cfgRes.json()) as { config?: { Labels?: Record<string, string> } }).config?.Labels ?? {};
+  if (labels["org.opencontainers.image.revision"] !== commit) return `${ref}: revision label ${labels["org.opencontainers.image.revision"]} != ${commit}`;
+  if (labels["org.opencontainers.image.source"] !== `https://github.com/${repo}`)
+    return `${ref}: source label ${labels["org.opencontainers.image.source"]} != https://github.com/${repo}`;
+  return null;
+}
+
+async function rawAt(repo: string, commit: string, path: string): Promise<string> {
+  const r = await fetch(`https://raw.githubusercontent.com/${repo}/${commit}/${path}`);
+  if (!r.ok) throw new Error(`${path} not found at ${repo}@${commit} (HTTP ${r.status})`);
+  return r.text();
+}
+
+/** Re-derives one index entry from the repo at the tag commit + the registry; returns the entry or a rejection. */
+async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: ReleaseCandidate): Promise<IndexRelease | string> {
+  try {
+    const ref = await gh("GET", `/repos/${doc.repo}/git/ref/tags/${encodeURIComponent(doc.tag)}`);
+    if (ref.status !== 200) return `tag ${doc.tag} not found`;
+    let sha = ref.json.object.sha as string;
+    if (ref.json.object.type === "tag") sha = (await gh("GET", `/repos/${doc.repo}/git/tags/${sha}`)).json.object.sha;
+    if (sha !== doc.commit) return `tag ${doc.tag} points to ${sha}, candidate says ${doc.commit}`;
+    if (versionFromTag(doc.tag) !== c.version) return `version ${c.version} != tag ${doc.tag}`;
+    let manifestDigest: string | null = null;
+    let skillsDigest: string | null = null;
+    let manifestUrl: string | null = null;
+    let declaredServices: string[] = [];
+    if (c.kind === "app") {
+      if (!c.manifest || !safeRel(c.manifest)) return "app candidate without a safe manifest path";
+      const v = m.validateManifest(JSON.parse(await rawAt(doc.repo, doc.commit, c.manifest)));
+      if (!v.ok) return `manifest invalid at ${doc.commit}`;
       const man = v.manifest as {
         id?: string;
         version?: string;
         skills?: { id: string; file: string }[];
         runtime?: { services?: { id: string; build?: unknown }[] };
       };
-      if (man.id !== im.product) fail(`manifest id ${man.id} != image product ${im.product}`);
-      if (man.version !== version) fail(`manifest version ${man.version} != tag version ${version}`);
-      const svcErrs = checkServiceImages(cfg, im.product, man.runtime?.services ?? []);
-      if (svcErrs.length) fail(svcErrs.join("; "));
+      if (man.id !== c.product || man.version !== c.version) return `manifest ${man.id}@${man.version} != ${c.product}@${c.version}`;
       manifestDigest = m.manifestDigest(v.manifest);
-      await uploadAsset(repo, releaseId, MANIFEST_FILE, text);
-      manifestUrl = `https://github.com/${OWNER}/${repo}/releases/download/${tag}/${MANIFEST_FILE}`;
-      const archive = skillsArchive(man, (rel) => readFileSync(join(root, dirname(im.manifest as string), rel), "utf8"));
-      skillsDigest = m.digest(archive);
-      await uploadAsset(repo, releaseId, `skills-${im.product}.json`, `${JSON.stringify(archive)}\n`);
+      manifestUrl = `https://raw.githubusercontent.com/${doc.repo}/${doc.commit}/${c.manifest}`;
+      const base = c.manifest.includes("/") ? c.manifest.slice(0, c.manifest.lastIndexOf("/") + 1) : "";
+      const files = new Map<string, string>();
+      for (const sk of man.skills ?? []) files.set(sk.file, await rawAt(doc.repo, doc.commit, base + sk.file));
+      skillsDigest = m.digest(skillsArchive(man, (f) => files.get(f) ?? ""));
+      declaredServices = (man.runtime?.services ?? [])
+        .filter((x) => x.build)
+        .map((x) => x.id)
+        .sort();
     }
-    const services = cfg.images
-      .filter((x) => x.kind === "service" && x.product === im.product)
-      .map((x) => {
-        const f = join(root, ".tb-ci/digests", `${x.name}.digest`);
-        if (!existsSync(f)) fail(`digest for service image ${x.name} missing (image-publish must run first)`);
-        const d = readFileSync(f, "utf8").trim();
-        if (!/^sha256:[0-9a-f]{64}$/.test(d)) fail(`bad digest for ${x.name}`);
-        return { id: x.service as string, image: `${IMAGE_NAMESPACE}/${x.name}@${d}` };
-      })
-      .sort((a, b) => a.id.localeCompare(b.id));
+    const got = c.services.map((x) => x.id).sort();
+    if (JSON.stringify(got) !== JSON.stringify(declaredServices)) return `service images [${got}] != manifest services with build [${declaredServices}]`;
     let runtime: BridgeRuntime | null = null;
-    if (im.kind === "bridge") {
-      const rf = join(root, dirname(im.dockerfile), "bridge-runtime.json");
-      if (!existsSync(rf)) fail(`bridge image needs ${dirname(im.dockerfile)}/bridge-runtime.json`);
-      runtime = validateBridgeRuntime(JSON.parse(readFileSync(rf, "utf8")));
+    if (c.kind === "bridge") {
+      if (!c.runtimeFile || !safeRel(c.runtimeFile)) return "bridge candidate without a safe runtime file path";
+      runtime = validateBridgeRuntime(JSON.parse(await rawAt(doc.repo, doc.commit, c.runtimeFile)));
     }
-    add.push({
+    for (const img of [c.image, ...c.services.map((x) => x.image)]) {
+      const problem = await verifyImageProvenance(img, doc.repo, doc.commit);
+      if (problem) return problem;
+    }
+    return {
       id: newId("rel"),
-      product: im.product,
-      kind: im.kind === "bridge" ? "bridge" : "app",
-      version,
-      channel,
+      product: c.product,
+      kind: c.kind,
+      version: c.version,
+      channel: channelForVersion(c.version),
       manifestDigest,
       manifestUrl,
       skillsDigest,
-      image: `${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`,
+      image: c.image,
       artifact: null,
       source: null,
       runtime,
-      services: im.kind === "app" ? services : null,
+      services: c.kind === "app" ? c.services : null,
       minOs: null,
       notarized: null,
-      upgradeFrom: im.upgradeFrom,
-      repo: `${OWNER}/${repo}`,
-      commit,
-      tag,
-      publishedAt: now,
-    });
-    log(`release ${im.product}@${version} (${channel}) ${IMAGE_NAMESPACE}/${im.name}@${imageDigest}`);
+      upgradeFrom: c.upgradeFrom,
+      repo: doc.repo,
+      commit: doc.commit,
+      tag: doc.tag,
+      publishedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    return (e as Error).message;
   }
-  await publishIndex(m, add);
+}
+
+/** Platform signer pipeline (cron/manual, platform repo only, holds release_signing_key):
+ *  collect release candidates from the opt2 repos, verify each independently, add them, re-sign when anything changed. */
+async function cmdRegistrySync(): Promise<void> {
+  const m = await loadManifestPkg(repoRoot());
+  const cur = await ghFile(INDEX_PATH, "main");
+  const index = cur ? (JSON.parse(cur) as ReleaseIndex) : null;
+  const known = new Set((index?.releases ?? []).map((r) => `${r.product}@${r.version}@${r.channel}`));
+  const add: IndexRelease[] = [];
+  const rejected: string[] = [];
+  for (const repo of OPT2_REPOS) {
+    const rels = await gh("GET", `/repos/${OWNER}/${repo}/releases?per_page=30`);
+    for (const rel of (rels.json ?? []) as { tag_name: string; assets: { name: string; browser_download_url: string }[] }[]) {
+      const asset = rel.assets?.find((x) => x.name === CANDIDATE_ASSET);
+      if (!asset) continue;
+      const doc = (await (await fetch(asset.browser_download_url)).json()) as ReleaseCandidateDoc;
+      if (doc.schema !== "opt2.release-candidate/v1" || doc.repo !== `${OWNER}/${repo}` || doc.tag !== rel.tag_name) {
+        rejected.push(`${repo} ${rel.tag_name}: candidate document does not match its release`);
+        continue;
+      }
+      for (const c of doc.candidates) {
+        if (known.has(`${c.product}@${c.version}@${channelForVersion(c.version)}`)) continue;
+        const r = await verifyCandidate(m, doc, c);
+        if (typeof r === "string") rejected.push(`${repo} ${doc.tag} ${c.product}: ${r}`);
+        else {
+          add.push(r);
+          known.add(`${r.product}@${r.version}@${r.channel}`);
+          log(`verified ${r.product}@${r.version} from ${repo}@${doc.commit.slice(0, 8)}`);
+        }
+      }
+    }
+  }
+  const offersText = await ghFile(OFFERS_PATH, "main");
+  const harnessesText = await ghFile(HARNESSES_PATH, "main");
+  const offersChanged = JSON.stringify(validateOffers(offersText ? JSON.parse(offersText) : [])) !== JSON.stringify(index?.offers ?? []);
+  const harnessesChanged = JSON.stringify(validateHarnesses(harnessesText ? JSON.parse(harnessesText) : [])) !== JSON.stringify(index?.harnesses ?? []);
+  const env = await ghFile(ENVELOPE_PATH, "main");
+  const exp = env ? (JSON.parse(Buffer.from(env.trim().split(".")[1], "base64url").toString("utf8")) as { exp: number }).exp : 0;
+  const expiring = exp - Date.now() / 1000 < 30 * 86400;
+  if (add.length || offersChanged || harnessesChanged || expiring) await publishIndex(m, add);
+  else log("registry-sync: nothing new");
+  if (rejected.length) fail(`rejected candidates:\n  - ${rejected.join("\n  - ")}`);
 }
 
 function argValue(args: string[], name: string): string | undefined {
@@ -1376,11 +1606,15 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddDesktop(rest);
     case "registry-sign":
       return cmdRegistrySign();
+    case "registry-sync":
+      return cmdRegistrySync();
+    case "pin-tarballs":
+      return cmdPinTarballs(rest);
     case "registry-add-source":
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|kit-release|audit-templates|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|kit-release|audit-templates|plan-images|release-record|package-release|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
       );
   }
 }
