@@ -76,6 +76,9 @@ Schema: `ci/tealbrick-ci.schema.json`. Example for a miniapp:
 ```
 Image names are the repo name or `<repo>-<component>` (for example `opt2-tealbrick-bridge-server`).
 Optional `"postgres": true` (ci-v9.1) starts the test database step; leave it out when no test reads `TB_TEST_DATABASE_URL`.
+Known (Woodpecker 3.19): when opted in, the detached `postgres` step is still running at pipeline end and Woodpecker marks it
+red ("no such container") on a green pipeline (probe: platform pipeline 97, unit reached the database). The step is not a gate.
+Opted-out repos get a green "skipped" step. Candidate fix for the next template: the step stops itself on a marker the unit step writes.
 
 Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "service"` image per manifest `runtime.services[]` entry that has `build` (same `product` as the app, `service` = the manifest service id). Setup fails if they do not match the manifest. On `v*` tags every image is published, and the app's release entry lists `services: [{id, image@sha256}]`.
 ```json
