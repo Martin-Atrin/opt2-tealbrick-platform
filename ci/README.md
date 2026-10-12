@@ -90,9 +90,14 @@ Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
 Releases are immutable: the same version with another image digest is rejected. See `registry/README.md`.
 
-## Woodpecker secrets
-- `ghcr_token` (org-level, owner Martin-Atrin, events push/tag/manual, never pull_request): GitHub classic PAT with `write:packages` + `public_repo` (image push, release assets, registry commit).
-- `release_signing_key` (REPO-level on opt2-tealbrick-platform ONLY, events cron/manual): Ed25519 private key (PKCS#8 PEM). Public keys: `registry/keys.json`. Never an org secret (SEC-03).
+## Woodpecker secrets (C67: per repo, per event; no org-level or global secrets)
+| Secret | Repos | Events | Used by |
+|---|---|---|---|
+| `ghcr_token` | releasing repos only: specs, sdk, bridge, packages, portal-core, portal-gui, knowledge, connect, samples | `tag` | image-push (crane), kit-upload, package-upload |
+| `ghcr_token` | opt2-tealbrick-platform | `cron`, `manual` | registry-sync (commit the signed index) |
+| `release_signing_key` | opt2-tealbrick-platform only | `cron`, `manual` | registry-sync (SEC-03) |
+No secret is available to `push` or `pull_request` pipelines anywhere. website, tbd and qa hold no secrets (website deploys via `ops/railway-deploy.ts`; TBD releases are signed on the release Mac). `node ops/woodpecker-activate.ts` enforces this table: it deletes org-level secrets and any repo secret not in the table, and sets values from 0600 files without printing them. Webhook tokens are never printed; rotate a leaked one per RUNBOOK §4.
+Known effect until Martin's ghcr token exists: tag pipelines of releasing repos and manual/cron runs of the platform signer error with `secret "ghcr_token" not found`.
 
 ## Clean-up and the shared host
 kaniko builds inside the step container: no host daemon images, no host socket, no privileged step.

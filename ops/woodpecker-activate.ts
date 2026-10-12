@@ -4,7 +4,8 @@
 //   ~/.config/opt2-tealbrick/woodpecker-token   Woodpecker personal access token (required)
 //   ~/.config/opt2-tealbrick/ghcr-token          GitHub PAT (write:packages, public_repo) -> secret ghcr_token
 //   ~/.config/opt2-tealbrick/release-key.pem     Ed25519 private key -> secret release_signing_key
-// Secrets are org-level for owner Martin-Atrin, events push/tag/manual only (never pull_request).
+// Secrets (C67): per repo and per event, never org-level: ghcr_token only on releasing repos for tag events (+ platform
+// cron/manual for the signer); release_signing_key only on the platform repo for cron/manual. See ci/README.md.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -62,32 +63,49 @@ for (const repo of REPOS) {
   await wp("PATCH", `/repos/${id}`, { require_approval: "forks", visibility: "public", timeout: 60 });
 }
 
+// ---- Secrets (C67): NO org-level or global secrets. Each secret lives only on the repos that need it, for the
+// events that need it. Values come from 0600 files and are never printed.
+const RELEASING = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "knowledge", "connect", "samples"].map((n) => `opt2-tealbrick-${n}`);
+interface Want {
+  repo: string;
+  name: string;
+  file: string;
+  events: string[];
+}
+const WANT: Want[] = [
+  // product releases: image push, kit/package upload run only on tag events (C62 steps)
+  ...RELEASING.map((repo) => ({ repo, name: "ghcr_token", file: "ghcr-token", events: ["tag"] })),
+  // platform signer (registry-sync, SEC-03): cron + manual, platform repo only
+  { repo: "opt2-tealbrick-platform", name: "ghcr_token", file: "ghcr-token", events: ["cron", "manual"] },
+  { repo: "opt2-tealbrick-platform", name: "release_signing_key", file: "release-key.pem", events: ["cron", "manual"] },
+];
+
 const org = await wp("GET", `/orgs/lookup/${OWNER}`);
 if (org.status !== 200) throw new Error(`org lookup failed (HTTP ${org.status})`);
-const orgId = org.json.id as number;
-// SEC-03: only ghcr_token is an org secret; the signing key is a platform-repo secret (below).
-const secrets: [string, string][] = [["ghcr_token", "ghcr-token"]];
-for (const [name, file] of secrets) {
-  const p = join(CFG, file);
-  if (!existsSync(p)) {
-    console.log(`secret ${name}: SKIP (${file} not present)`);
-    continue;
+for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? []) as { name: string }[]) {
+  const d = await wp("DELETE", `/orgs/${org.json.id}/secrets/${sec.name}`);
+  console.log(`org secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
+}
+const ids = new Map<string, number>();
+for (const repo of REPOS) ids.set(repo, (await wp("GET", `/repos/lookup/${OWNER}/${repo}`)).json.id as number);
+for (const repo of REPOS) {
+  const id = ids.get(repo) as number;
+  const want = WANT.filter((w) => w.repo === repo);
+  for (const sec of ((await wp("GET", `/repos/${id}/secrets`)).json ?? []) as { name: string }[]) {
+    if (!want.some((w) => w.name === sec.name)) {
+      const d = await wp("DELETE", `/repos/${id}/secrets/${sec.name}`);
+      console.log(`${repo} secret ${sec.name}: ${d.status < 300 ? "deleted (not needed here)" : `DELETE FAILED (HTTP ${d.status})`}`);
+    }
   }
-  const value = readFileSync(p, "utf8").trim();
-  const body = { name, value, events: ["push", "tag", "manual"], images: [] };
-  const exists = (await wp("GET", `/orgs/${orgId}/secrets/${name}`)).status === 200;
-  const r = exists ? await wp("PATCH", `/orgs/${orgId}/secrets/${name}`, body) : await wp("POST", `/orgs/${orgId}/secrets`, body);
-  console.log(`secret ${name}: ${r.status === 200 ? (exists ? "updated" : "created") : `FAILED (HTTP ${r.status})`}`);
+  for (const w of want) {
+    const p = join(CFG, w.file);
+    if (!existsSync(p)) {
+      console.log(`${repo} secret ${w.name}: SKIP (${w.file} not present)`);
+      continue;
+    }
+    const body = { name: w.name, value: readFileSync(p, "utf8").trim(), events: w.events, images: [] };
+    const exists = (await wp("GET", `/repos/${id}/secrets/${w.name}`)).status === 200;
+    const r = exists ? await wp("PATCH", `/repos/${id}/secrets/${w.name}`, body) : await wp("POST", `/repos/${id}/secrets`, body);
+    console.log(`${repo} secret ${w.name} [${w.events.join(",")}]: ${r.status === 200 ? (exists ? "updated" : "created") : `FAILED (HTTP ${r.status})`}`);
+  }
 }
-// Never an org secret: remove a leftover org-level signing key.
-if ((await wp("GET", `/orgs/${orgId}/secrets/release_signing_key`)).status === 200) {
-  const d = await wp("DELETE", `/orgs/${orgId}/secrets/release_signing_key`);
-  console.log(`org secret release_signing_key: ${d.status === 204 || d.status === 200 ? "deleted" : `DELETE FAILED (HTTP ${d.status})`}`);
-}
-const platform = await wp("GET", `/repos/lookup/${OWNER}/opt2-tealbrick-platform`);
-const keyBody = { name: "release_signing_key", value: readFileSync(join(CFG, "release-key.pem"), "utf8").trim(), events: ["cron", "manual"], images: [] };
-const hasRepoKey = (await wp("GET", `/repos/${platform.json.id}/secrets/release_signing_key`)).status === 200;
-const rk = hasRepoKey
-  ? await wp("PATCH", `/repos/${platform.json.id}/secrets/release_signing_key`, keyBody)
-  : await wp("POST", `/repos/${platform.json.id}/secrets`, keyBody);
-console.log(`platform repo secret release_signing_key: ${rk.status === 200 ? (hasRepoKey ? "updated" : "created") : `FAILED (HTTP ${rk.status})`}`);
