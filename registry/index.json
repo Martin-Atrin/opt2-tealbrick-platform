@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T15:15:57.524Z",
+  "generatedAt": "2026-10-12T15:16:59.859Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -2331,6 +2331,36 @@
         {
           "title": "Use the bridge from Eve",
           "detail": "In the Eve agent, use the package @opt2-tealbrick/harness-eve (connectEveToBridge). It starts the local relay and turns the granted apps into Eve tools."
+        }
+      ]
+    },
+    {
+      "id": "tealbrick-cli",
+      "kind": "agentic_system",
+      "label": "Agent on the tealbrick command line",
+      "icon": null,
+      "authorise": "device_approval",
+      "noAgentPath": false,
+      "instructions": [
+        {
+          "title": "Install the command line tool",
+          "detail": "On the agent's machine, install the tealbrick command line tool from the Teal Brick releases page."
+        },
+        {
+          "title": "Connect the agent",
+          "detail": "Run this command and approve the request in the Portal page it shows (one click).",
+          "copy": {
+            "kind": "command",
+            "value": "tealbrick agent login --agent {{agentId}} --harness tealbrick-cli"
+          }
+        },
+        {
+          "title": "Run the agent",
+          "detail": "Start the agent with an agent-serve file. Its harness is either claude (Claude Agent SDK via @opt2-tealbrick/harness-claude) or command (your own program).",
+          "copy": {
+            "kind": "command",
+            "value": "tealbrick agent serve --file agent-serve.json --agent {{agentId}}"
+          }
         }
       ]
     },
