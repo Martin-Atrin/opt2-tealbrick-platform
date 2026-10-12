@@ -19,3 +19,6 @@
 ## Bridge + app volumes (customer workspaces) — C16 S7
 Bridge: Railway volume backup DAILY, kept 7 days, set by the bridge template (BRIDGE.md). `TB_KEK` is provider-held and not in the volume. Restore test at P2 in project opt2-test-customer: restore the latest bridge volume backup into a fresh bridge service with the same `TB_KEK` reference, check it unseals its state and serves its last good config.
 Apps: baked into the Miniapp SDK (each app's backup volume in its Railway template) — owned by Lead · Specs & SDK; Platform adds the restore test for the test customer workspace at P2.
+
+## Cleanup note: opt2-test-customer orphaned volumes (2026-10-12)
+22 volumes left by Core's probe/e2e deploys (tb-bridge*, tb-knowledge*, vol-probe*; ~14 GB) have no attached service. Railway already shows every one with a scheduled `deletedAt` (2026-10-13 11:42 → 2026-10-14 00:04 UTC, = 48 h after detach), so Railway deletes them itself. None were deleted by hand. redis-volume and postgres-volume (attached, buzz-test-relay stack) untouched.
