@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v9.4)
+# opt2 CI standard (template ci-v9.5)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -113,6 +113,8 @@ Never run a global `docker/podman system prune` on the CI host (shared daemon).
 1. Edit `ci/tb-ci.ts` and/or `ci/woodpecker/ci.yaml`. For a new version, bump `TB_CI_REF` in the template.
 2. `pnpm stamp` (writes the runner sha256 into the template and `.woodpecker/ci.yaml`).
 3. Commit, tag `ci-vN`, push the tag. Re-run `adopt` in each repo (copies the new template).
+
+ci-v9.5 (F27): the release Action publishes `<tarball>.integrity` next to each `<tarball>.sha256`: one line, the npm/pnpm lockfile `integrity` value (`sha512-…`) of the same bytes, so a consumer pins it without computing it (`assetChecksums` in `ci/tb-ci.ts`). Repos get it when they re-run `adopt` (template + release workflow). Nothing else changed; `MIN_TEMPLATE` stays `ci-v8`.
 
 ci-v9.4: `release-record` and the registry-sync signer load `@opt2-tealbrick/manifest` 0.1.12 with `@opt2-tealbrick/spec` 0.1.20 (both sha512-pinned; the manifest package itself asks for spec 0.1.18, the override replaces it). Manifest 0.1.12 accepts `holdFamily` `outward` and `identity` (C107) and refuses an outward op WITHOUT a family. Before this, manifests using the new families were refused (`connect` 0.5.0: "manifest invalid at bb526c3"). Dry run: all 55 indexed app manifests re-validate under 0.1.12 with unchanged `manifestDigest`. New: `DEV_ONLY_PRODUCTS` (see the signer section). Tests: `ci-v9.4:` in `ci/tb-ci.test.ts` (they install the pinned tarballs, so they need the network). `MIN_TEMPLATE` stays `ci-v8`.
 

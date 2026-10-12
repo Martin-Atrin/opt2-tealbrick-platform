@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   addPnpmIntegrity,
+  assetChecksums,
   belowMinimum,
   channelForVersion,
   checkDependencies,
@@ -838,4 +839,17 @@ test("C113: devOnly mark + re-classification of an old stable record; identical 
     merged.releases.map((r) => `${r.product}@${r.version}@${r.channel}${r.devOnly ? "+devOnly" : ""}`),
     ["connect@0.5.0@stable", "sample-gate@0.1.1@dev+devOnly", "sample-gate@0.2.0-dev.1@dev+devOnly"],
   );
+});
+
+test("ci-v9.5 (F27): each release tarball gets a .sha256 and an npm-style .integrity file", () => {
+  const data = new TextEncoder().encode("tarball bytes");
+  const c = assetChecksums("opt2-tealbrick-spec-0.1.22.tgz", data);
+  assert.match(c.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(c.integrity, sha512Integrity(data));
+  assert.deepEqual(c.files, [
+    { name: "opt2-tealbrick-spec-0.1.22.tgz.sha256", body: `${c.sha256}  opt2-tealbrick-spec-0.1.22.tgz\n` },
+    { name: "opt2-tealbrick-spec-0.1.22.tgz.integrity", body: `${c.integrity}\n` },
+  ]);
+  // the value npm writes into package-lock.json for the same bytes
+  assert.match(c.files[1]!.body.trim(), /^sha512-[A-Za-z0-9+/]{86}==$/);
 });

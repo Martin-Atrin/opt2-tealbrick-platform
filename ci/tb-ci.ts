@@ -734,6 +734,21 @@ export function sha512Integrity(data: Uint8Array): string {
   return `sha512-${createHash("sha512").update(data).digest("base64")}`;
 }
 
+/** ci-v9.5 (F27): the checksum files published next to each release tarball: `<name>.sha256` (sha256sum format, as
+ *  before) and `<name>.integrity` (the npm/pnpm lockfile `integrity` value, sha512, one line). Pure. */
+export function assetChecksums(name: string, data: Uint8Array): { sha256: string; integrity: string; files: { name: string; body: string }[] } {
+  const sha256 = createHash("sha256").update(data).digest("hex");
+  const integrity = sha512Integrity(data);
+  return {
+    sha256,
+    integrity,
+    files: [
+      { name: `${name}.sha256`, body: `${sha256}  ${name}\n` },
+      { name: `${name}.integrity`, body: `${integrity}\n` },
+    ],
+  };
+}
+
 /** C62/BSD-10: write `integrity` into every pnpm `resolution: {tarball: …}` for a GitHub-release tarball. Pure. */
 export function addPnpmIntegrity(lockText: string, integrityOf: (url: string) => string): { text: string; changed: number } {
   let changed = 0;
@@ -1282,10 +1297,10 @@ async function cmdGhPublish(): Promise<void> {
     for (const name of plan.assets) {
       if (!KIT_NAME_RE.test(name) && !PKG_NAME_RE.test(name)) fail(`unexpected asset name ${name}`);
       const data = readFileSync(join(out, "assets", name));
-      const sha = createHash("sha256").update(data).digest("hex");
+      const sums = assetChecksums(name, data);
       await uploadFile(repo, releaseId, name, data, "application/gzip");
-      await uploadFile(repo, releaseId, `${name}.sha256`, Buffer.from(`${sha}  ${name}\n`), "text/plain");
-      log(`attached ${name} (sha256 ${sha})`);
+      for (const f of sums.files) await uploadFile(repo, releaseId, f.name, Buffer.from(f.body), "text/plain");
+      log(`attached ${name} (sha256 ${sums.sha256}, integrity ${sums.integrity})`);
     }
   }
   log(`gh-publish: done (${plan.images.length} image(s), ${plan.assets.length} asset(s))`);
