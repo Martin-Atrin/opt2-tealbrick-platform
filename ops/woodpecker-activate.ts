@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const OWNER = "Martin-Atrin";
-const REPOS = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "website", "knowledge", "connect", "tbd", "platform", "qa", "samples", "kanban"].map(
+const REPOS = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "website", "knowledge", "connect", "tbd", "platform", "qa", "samples", "kanban", "rules"].map(
   (n) => `opt2-tealbrick-${n}`,
 );
 const CFG = join(homedir(), ".config/opt2-tealbrick");
