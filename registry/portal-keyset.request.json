@@ -1,0 +1,11 @@
+{
+  "schema": "opt2.keyset-request/v1",
+  "seq": 1,
+  "iat": 1791799537,
+  "keys": [
+    {
+      "jwk": { "kty": "OKP", "crv": "Ed25519", "x": "R5CC6JqqtrdK9eCQzrAVe4sjjecZh0x9AXokW4NgroM", "kid": "UyBWTWtGScd3EGiaQ3_6y-cjTlWWOpo_1CvSRJhiZjE" },
+      "status": "active"
+    }
+  ]
+}
