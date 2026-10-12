@@ -55,6 +55,7 @@ Portal never connects in; the owner's bridge pulls config. Symptoms: agents get 
 2. Bridge health: the owner's Railway → bridge service → `/healthz` (live) and `/readyz` (enrolled + config fresh).
 3. Re-enrol only if the bridge key is lost: Portal → workspace → bridge → new enrolment code (Core refuses the old key at once).
 4. App broken after an update: `instances.rollback` to the previous release.
+5. If a workspace's Rules app is down, every agent call in that workspace is refused (hook_failed), reads included, because the Rules gate covers all ops and hooks fail closed. Triage: Rules instance health → redeploy Rules (data is kept) → calls resume within ~30 s.
 
 ## 7. Close
 Status page green for 15 minutes, GlitchTip quiet, root cause written in `ops/INCIDENTS.md` (what, why, fix, follow-up), follow-up tasks filed with the owning lead.

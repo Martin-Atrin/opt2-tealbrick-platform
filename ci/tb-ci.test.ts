@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   addPnpmIntegrity,
@@ -13,10 +14,12 @@ import {
   checkPackageJson,
   checkPackedTarball,
   checkServiceImages,
+  DEV_ONLY_PRODUCTS,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
   type IndexRelease,
+  loadManifestPkg,
   lockfileTarballs,
   lockPinProblems,
   mergeIndex,
@@ -30,6 +33,7 @@ import {
   packageReleaseCommands,
   packEntryTargets,
   parsePackageTag,
+  releaseChannel,
   releaseUrl,
   renderImagesScript,
   sha512Integrity,
@@ -670,4 +674,101 @@ test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile
     1,
   );
   assert.equal(lockPinProblems({ packages: {} }, { manifest, spec: integrity }).length, 2);
+});
+
+// ---------- ci-v9.4 ----------
+
+test("ci-v9.4: DEV_ONLY_PRODUCTS is one list; the signer indexes them on dev only and refuses stable", () => {
+  assert.deepEqual([...DEV_ONLY_PRODUCTS].sort(), ["sample-caller", "sample-gate", "sample-mismatch", "sample-pay"]);
+  const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  for (const p of DEV_ONLY_PRODUCTS) assert.equal(src.split(`"${p}"`).length - 1, 1, `${p} is named once in tb-ci.ts (DEV_ONLY_PRODUCTS)`);
+  // channel the signer derives: a plain x.y.z tag of a sample is still dev; other products keep the semver rule
+  for (const p of DEV_ONLY_PRODUCTS) {
+    assert.equal(releaseChannel(p, "0.1.2"), "dev");
+    assert.equal(releaseChannel(p, "0.1.2-rc.1"), "dev");
+  }
+  assert.equal(releaseChannel("connect", "0.5.0"), "stable");
+  assert.equal(releaseChannel("connect", "0.5.0-rc.1"), "dev");
+  assert.equal(releaseChannel("sample-gate-pro", "1.0.0"), "stable", "exact ids only");
+  // merge: a dev sample release is indexed, a stable one is refused (whatever path built it)
+  const sample = (channel: "dev" | "stable") =>
+    rel({ product: "sample-pay", version: "0.1.2", channel, tag: "v0.1.2", repo: "Martin-Atrin/opt2-tealbrick-samples" });
+  const merged = mergeIndex(null, [sample("dev")], [], "2026-10-13T00:00:00.000Z");
+  assert.deepEqual(
+    merged.releases.map((r) => `${r.product}@${r.version}@${r.channel}`),
+    ["sample-pay@0.1.2@dev"],
+  );
+  for (const p of DEV_ONLY_PRODUCTS)
+    assert.throws(() => mergeIndex(merged, [rel({ product: p, channel: "stable" })], [], "2026-10-13T00:00:00.000Z"), /dev-only/);
+  // other products are unaffected
+  assert.equal(mergeIndex(merged, [rel({ product: "connect", version: "0.5.0" })], [], "2026-10-13T00:00:00.000Z").releases.length, 2);
+});
+
+/** The spec's own example manifest plus one outward op per new hold family (C107: outward, identity). */
+function holdFamilyManifest(specDir: string): unknown {
+  const ex = JSON.parse(readFileSync(join(specDir, "examples/notes.manifest.json"), "utf8")) as { operations: Record<string, unknown>[] };
+  const write = ex.operations.find((o) => o.effect === "write");
+  assert.ok(write, "the spec example has a write op to copy");
+  const outward = (family: string) => ({
+    ...write,
+    id: `note_share_${family}`,
+    title: `Share (${family})`,
+    crud: ["update"],
+    effect: "outward",
+    holdFamily: family,
+    idempotency: "supported",
+    receipt: true,
+  });
+  return { ...ex, operations: [...ex.operations, outward("outward"), outward("identity")] };
+}
+
+function assertHoldFamilies(m: { validateManifest(json: unknown): { ok: boolean; errors?: unknown[] } }, specDir: string, who: string): void {
+  const good = holdFamilyManifest(specDir) as { operations: Record<string, unknown>[] };
+  const v = m.validateManifest(good);
+  assert.equal(v.ok, true, `${who}: holdFamily outward/identity must validate: ${JSON.stringify(v.errors ?? []).slice(0, 500)}`);
+  const bad = { ...good, operations: good.operations.map((o) => (o.holdFamily === "identity" ? { ...o, holdFamily: "nonsense" } : o)) };
+  assert.equal(m.validateManifest(bad).ok, false, `${who}: an unknown hold family is still refused`);
+}
+
+test("ci-v9.4: release-record loads the pinned manifest 0.1.12 + spec 0.1.20 and accepts holdFamily outward/identity", { timeout: 180_000 }, async () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const pin = (k: string) => new RegExp(`${k}: (\\S+)`).exec(tpl)?.[1] ?? "";
+  assert.match(pin("TB_MANIFEST_PKG"), /manifest-v0\.1\.12\/opt2-tealbrick-manifest-0\.1\.12\.tgz$/);
+  assert.match(pin("TB_SPEC_PKG"), /spec-v0\.1\.20\/opt2-tealbrick-spec-0\.1\.20\.tgz$/);
+  const keys = ["TB_MANIFEST_PKG", "TB_MANIFEST_INTEGRITY", "TB_SPEC_PKG", "TB_SPEC_INTEGRITY", "TB_MANIFEST_MODULE"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  const work = mkdtempSync(join(tmpdir(), "tb-release-record-"));
+  try {
+    delete process.env.TB_MANIFEST_MODULE;
+    for (const k of keys.slice(0, 4)) process.env[k] = pin(k);
+    const m = await loadManifestPkg(work); // downloads, checks both sha512 pins, installs, reads the lockfile back
+    const specDir = join(work, ".tb-ci/pkgs/node_modules/@opt2-tealbrick/spec");
+    assert.equal((JSON.parse(readFileSync(join(specDir, "package.json"), "utf8")) as { version: string }).version, "0.1.20");
+    assertHoldFamilies(m, specDir, "release-record");
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("ci-v9.4: the registry-sync signer (ops/signer lockfile) validates holdFamily outward/identity", { timeout: 180_000 }, async () => {
+  const work = mkdtempSync(join(tmpdir(), "tb-signer-"));
+  try {
+    for (const f of ["package.json", "package-lock.json"]) writeFileSync(join(work, f), readFileSync(new URL(`../ops/signer/${f}`, import.meta.url)));
+    // exactly what .github/workflows/registry-sync.yml runs
+    execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: work, stdio: "pipe" });
+    const nm = join(work, "node_modules/@opt2-tealbrick");
+    assert.equal((JSON.parse(readFileSync(join(nm, "manifest/package.json"), "utf8")) as { version: string }).version, "0.1.12");
+    assert.equal((JSON.parse(readFileSync(join(nm, "spec/package.json"), "utf8")) as { version: string }).version, "0.1.20");
+    const wf = readFileSync(new URL("../.github/workflows/registry-sync.yml", import.meta.url), "utf8");
+    const entry = /TB_MANIFEST_MODULE: ops\/signer\/(\S+)/.exec(wf)?.[1] ?? "";
+    assert.ok(entry, "the workflow points TB_MANIFEST_MODULE into ops/signer");
+    const m = (await import(pathToFileURL(join(work, entry)).href)) as { validateManifest(json: unknown): { ok: boolean; errors?: unknown[] } };
+    assertHoldFamilies(m, join(nm, "spec"), "signer");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });

@@ -251,6 +251,19 @@ export function channelForVersion(version: string): Channel {
   return version.includes("-") ? "dev" : "stable";
 }
 
+/** ci-v9.4: products the signer indexes ONLY on channel "dev" (test fixtures; never offered to stable workspaces).
+ *  The one list: releaseChannel() and mergeIndex() both read it. */
+export const DEV_ONLY_PRODUCTS: readonly string[] = ["sample-gate", "sample-caller", "sample-pay", "sample-mismatch"];
+
+export function isDevOnlyProduct(product: string): boolean {
+  return DEV_ONLY_PRODUCTS.includes(product);
+}
+
+/** The channel the signer indexes a release on: a dev-only product is always "dev", whatever its version says. */
+export function releaseChannel(product: string, version: string): Channel {
+  return isDevOnlyProduct(product) ? "dev" : channelForVersion(version);
+}
+
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /** `<prefix>_<ULID>` (CORE §1). */
 export function newId(prefix: string, now = Date.now(), rand: Uint8Array = randomBytes(10)): string {
@@ -551,6 +564,8 @@ export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEn
 export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string, harnesses: Harness[] = []): ReleaseIndex {
   const releases: IndexRelease[] = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null, services: r.services ?? null }));
   for (const r of add) {
+    if (r.channel === "stable" && isDevOnlyProduct(r.product))
+      throw new Error(`${r.product}@${r.version}: ${r.product} is dev-only (DEV_ONLY_PRODUCTS); the signer refuses a stable release`);
     if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
     if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
@@ -1295,7 +1310,7 @@ export function lockPinProblems(lock: { packages?: Record<string, { integrity?: 
   return out;
 }
 
-async function loadManifestPkg(root: string): Promise<ManifestPkg> {
+export async function loadManifestPkg(root: string): Promise<ManifestPkg> {
   const override = process.env.TB_MANIFEST_MODULE; // local path to a built package (development)
   let entry: string;
   if (override) {
@@ -1606,7 +1621,7 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
       product: c.product,
       kind: c.kind,
       version: c.version,
-      channel: channelForVersion(c.version),
+      channel: releaseChannel(c.product, c.version),
       manifestDigest,
       manifestUrl,
       skillsDigest,
@@ -1700,7 +1715,7 @@ async function cmdRegistrySync(): Promise<void> {
       }
       if (!doc) continue; // no images for this tag (yet): pending, not an error
       for (const c of doc.candidates) {
-        if (known.has(`${c.product}@${version}@${channelForVersion(version)}`)) continue;
+        if (known.has(`${c.product}@${version}@${releaseChannel(c.product, version)}`)) continue;
         const r = await verifyCandidate(m, doc, c);
         if (typeof r === "string") rejected.push(`${repo} ${doc.tag} ${c.product}: ${r}`);
         else {
