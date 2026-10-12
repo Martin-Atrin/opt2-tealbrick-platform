@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "test": "node --test 'ci/**/*.test.ts' 'registry/**/*.test.ts'",
+    "test": "node --test 'ci/**/*.test.ts' 'registry/**/*.test.ts' 'ops/**/*.test.ts'",
     "stamp": "node ci/tb-ci.ts stamp"
   },
   "devDependencies": {

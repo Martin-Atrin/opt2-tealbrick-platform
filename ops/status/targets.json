@@ -1,0 +1,22 @@
+[
+  { "id": "portal-gui", "name": "Portal", "url": "https://dev.tealbrick.com/", "expect": { "status": 200 } },
+  {
+    "id": "portal-api",
+    "name": "Portal API (gateway → Core)",
+    "url": "https://dev.tealbrick.com/api/v1/me",
+    "expect": { "status": 401, "bodyIncludes": "\"error\"" }
+  },
+  {
+    "id": "portal-core",
+    "name": "Portal Core health (private)",
+    "url": "http://portal-core.railway.internal:8080/internal/health",
+    "expect": { "status": 200, "bodyIncludes": "\"ok\":true" }
+  },
+  { "id": "website", "name": "Website (preview)", "url": "https://website-production-66a1.up.railway.app/", "expect": { "status": 200 } },
+  {
+    "id": "release-index",
+    "name": "Release index (signed)",
+    "url": "https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.jws",
+    "expect": { "status": 200 }
+  }
+]
