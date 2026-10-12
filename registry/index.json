@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T05:19:23.269Z",
+  "generatedAt": "2026-10-12T05:26:33.398Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -1172,6 +1172,30 @@
       "tag": "v0.1.0-dev.2",
       "publishedAt": "2026-10-11T11:53:19.604Z",
       "services": null
+    },
+    {
+      "id": "rel_01M4Q97AD1GX7VRSHX3XYNFJAY",
+      "product": "tbd",
+      "kind": "desktop",
+      "version": "0.1.0-dev.3",
+      "channel": "dev",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": {
+        "url": "https://github.com/Martin-Atrin/opt2-tealbrick-tbd/releases/download/v0.1.0-dev.3/TBD-0.1.0-1.zip",
+        "sha256": "sha256:104cf288f96d21ecdecb906d0eac139a4e439d43a61f7bf43e9409faf2e6b6f4"
+      },
+      "source": null,
+      "runtime": null,
+      "minOs": "14.0",
+      "notarized": true,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-tbd",
+      "commit": null,
+      "tag": "v0.1.0-dev.3",
+      "publishedAt": "2026-10-12T05:26:31.586Z"
     }
   ],
   "offers": [
