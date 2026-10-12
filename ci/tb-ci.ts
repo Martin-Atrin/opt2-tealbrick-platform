@@ -689,7 +689,12 @@ export function validateOffers(raw: unknown): Offer[] {
     if (!Array.isArray(r.products) || r.products.length === 0) fail("products required");
     if (r.kind === "single" && (r.products as unknown[]).length !== 1) fail("a single offer has exactly one product");
     if (!Number.isInteger(r.major) || (r.major as number) < 0) fail("major");
-    if (!Number.isInteger(r.amount) || (r.amount as number) <= 0) fail("amount (minor units)");
+    if (!Number.isInteger(r.amount) || (r.amount as number) < 0) fail("amount (minor units)");
+    // Free fixture offer: amount 0 only for DEV_ONLY_PRODUCTS, single, no Stripe price (Core grants the licence with no
+    // checkout, only in dev-channel workspaces).
+    const free = r.amount === 0;
+    if (free && (r.kind !== "single" || !(r.products as unknown[]).every((p) => typeof p === "string" && isDevOnlyProduct(p))))
+      fail("amount 0 (free) is only for a single offer of a DEV_ONLY_PRODUCTS product");
     if (typeof r.currency !== "string" || !/^[a-z]{3}$/.test(r.currency)) fail("currency (ISO lower case)");
     for (const k of ["name", "taxNote"]) if (typeof r[k] !== "string" || !(r[k] as string)) fail(k);
     const sp = r.stripePrice as Record<string, unknown> | undefined;
@@ -697,6 +702,7 @@ export function validateOffers(raw: unknown): Offer[] {
     for (const m of ["test", "live"] as const) {
       const v = (sp as Record<string, unknown>)[m];
       if (v !== null && (typeof v !== "string" || !/^price_[A-Za-z0-9]+$/.test(v))) fail(`stripePrice.${m} must be price_… or null`);
+      if (free && v !== null) fail(`a free offer has no Stripe price (stripePrice.${m} must be null)`);
     }
     return r as unknown as Offer;
   });

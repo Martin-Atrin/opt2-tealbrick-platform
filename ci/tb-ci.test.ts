@@ -179,6 +179,18 @@ test("offers validation", () => {
   assert.throws(() => validateOffers([{ ...ok, products: ["a", "b"] }]), /exactly one/);
   assert.throws(() => validateOffers([{ ...ok, stripePrice: { test: "sk_test_x", live: null } }]), /price_/);
   assert.throws(() => validateOffers([ok, ok]), /duplicate/);
+  // free fixture offers: DEV_ONLY_PRODUCTS only, no Stripe price
+  const free = { ...ok, products: ["sample-pay"], amount: 0, stripePrice: { test: null, live: null } };
+  assert.equal(validateOffers([free]).length, 1);
+  assert.throws(() => validateOffers([{ ...free, products: ["knowledge"] }]), /DEV_ONLY_PRODUCTS/);
+  assert.throws(() => validateOffers([{ ...free, stripePrice: { test: "price_123", live: null } }]), /no Stripe price/);
+  assert.throws(() => validateOffers([{ ...ok, amount: -1 }]), /amount/);
+  // the reviewed registry input passes
+  const offers = validateOffers(JSON.parse(readFileSync(new URL("../registry/offers.json", import.meta.url), "utf8")));
+  assert.deepEqual(
+    offers.filter((o) => o.amount === 0).map((o) => o.products[0]),
+    ["sample-pay", "sample-mismatch"],
+  );
 });
 
 test("skills archive is sorted and complete", () => {
