@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T18:46:40.747Z",
+  "generatedAt": "2026-10-12T19:48:56.067Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -1497,6 +1497,28 @@
       "publishedAt": "2026-10-12T15:51:27.129Z"
     },
     {
+      "id": "rel_01M4RTJ16862QBZF9PA9MJGXD5",
+      "product": "connect",
+      "kind": "app",
+      "version": "0.5.0",
+      "channel": "stable",
+      "manifestDigest": "sha256:387ab0d1086b192aec10e22fbe7b49f0ccea78dfce986d5881609949dda910ed",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-connect/bb526c3f8e0243dff545ea92a53caf85b6393d76/tealbrick.manifest.json",
+      "skillsDigest": "sha256:179307329feed11877c275ef602503d1a12226b7956372ffbba7b5a8f6090f15",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-connect@sha256:c54f8e4d402d9c23126363f6a566e61ca912d855c3a93871ed177d3a3955509a",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-connect",
+      "commit": "bb526c3f8e0243dff545ea92a53caf85b6393d76",
+      "tag": "v0.5.0",
+      "publishedAt": "2026-10-12T19:48:42.825Z"
+    },
+    {
       "id": "rel_01M4QYD1Y4FWVHZ98EG07BGTVS",
       "product": "evolution",
       "kind": "app",
@@ -2478,6 +2500,28 @@
       "publishedAt": "2026-10-12T06:24:56.123Z"
     },
     {
+      "id": "rel_01M4RTJ5WR4KSGR7JCRGJ74105",
+      "product": "sample-caller",
+      "kind": "app",
+      "version": "0.1.1",
+      "channel": "dev",
+      "manifestDigest": "sha256:6c4fddc7a9dbe330cf91e96d5b26d1518fd699dabf390dde2df2d385e2ba0229",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-samples/9ecb7b7965388009b51840a609f7e569e038ad67/sample-caller/tealbrick.manifest.json",
+      "skillsDigest": "sha256:900d0b4957619e3aa34a79d2a42b131c29999766a41bd9fd1e2fc10e9821e8fd",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-samples-caller@sha256:91f8410bd95a714ab9443b878584f28af0a5e29624f77918efcf088a91c4c51d",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-samples",
+      "commit": "9ecb7b7965388009b51840a609f7e569e038ad67",
+      "tag": "v0.1.1",
+      "publishedAt": "2026-10-12T19:48:47.640Z"
+    },
+    {
       "id": "rel_01M4QA48XR9QC5QRDSC4E1T6DT",
       "product": "sample-gate",
       "kind": "app",
@@ -2525,6 +2569,28 @@
       "commit": "9ecb7b7965388009b51840a609f7e569e038ad67",
       "tag": "v0.1.1",
       "publishedAt": "2026-10-12T06:24:55.108Z"
+    },
+    {
+      "id": "rel_01M4RTJ56HQH0BVWBTEBSSW7AC",
+      "product": "sample-gate",
+      "kind": "app",
+      "version": "0.1.1",
+      "channel": "dev",
+      "manifestDigest": "sha256:495ebbc24d226f0fcb059596b66a9299964f67721577842f94397e8c3592fbb4",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-samples/9ecb7b7965388009b51840a609f7e569e038ad67/sample-gate/tealbrick.manifest.json",
+      "skillsDigest": "sha256:72529af9fc667d27fd76469f4469ff86330c214f0ffe80364de74de13cd4f429",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-samples-gate@sha256:05d830abed1839ea592dafad71d2ca555a2d32929d418a9dcd708a60176e3a4b",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-samples",
+      "commit": "9ecb7b7965388009b51840a609f7e569e038ad67",
+      "tag": "v0.1.1",
+      "publishedAt": "2026-10-12T19:48:46.929Z"
     },
     {
       "id": "rel_01M4NCYVFMKJ21NEVM3HDWAGNB",
