@@ -61,6 +61,7 @@ export const OPT2_REPOS = [
   "kanban",
   "rules",
   "inbox",
+  "fleet",
 ].map((n) => `opt2-tealbrick-${n}`);
 export const MIN_TEMPLATE_PATH = "ci/MIN_TEMPLATE";
 export type Kind = (typeof KINDS)[number];
