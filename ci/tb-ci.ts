@@ -114,7 +114,7 @@ export interface BridgeRuntime {
   healthPath: string; // liveness
   readyPath: string; // ready after enrolment
   volumes: { mountPath: string; backup: boolean }[]; // backup = Railway volume backups on (C28, S7)
-  env: { name: string; source: "portal" | "provider-secret" | "public-url" | "fixed"; value?: string }[];
+  env: { name: string; source: "portal" | "provider-secret" | "public-url" | "public-url-keys" | "fixed"; value?: string }[];
 }
 
 export function validateBridgeRuntime(raw: unknown): BridgeRuntime {
@@ -131,7 +131,7 @@ export function validateBridgeRuntime(raw: unknown): BridgeRuntime {
   if (!Array.isArray(r.env)) throw new Error("runtime: env list required");
   for (const e of r.env as Record<string, unknown>[]) {
     if (typeof e.name !== "string" || !/^[A-Z][A-Z0-9_]{1,63}$/.test(e.name)) throw new Error(`runtime: bad env name ${String(e.name)}`);
-    if (!["portal", "provider-secret", "public-url", "fixed"].includes(e.source as string)) throw new Error(`runtime: env ${e.name} source`);
+    if (!["portal", "provider-secret", "public-url", "public-url-keys", "fixed"].includes(e.source as string)) throw new Error(`runtime: env ${e.name} source`);
     if (e.source === "fixed" ? typeof e.value !== "string" : e.value !== undefined) throw new Error(`runtime: env ${e.name}: value only for source fixed`);
   }
   return r as unknown as BridgeRuntime;
