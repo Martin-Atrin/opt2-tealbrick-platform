@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T01:33:55.116Z",
+  "generatedAt": "2026-10-12T01:45:31.249Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -491,6 +491,76 @@
       "tag": null,
       "publishedAt": "2026-10-12T01:06:02.268Z",
       "services": null
+    },
+    {
+      "id": "rel_01M4PWJJC1F6ENM4KW60JNRDRX",
+      "product": "bridge",
+      "kind": "bridge",
+      "version": "0.1.8",
+      "channel": "dev",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": null,
+      "source": {
+        "repo": "Martin-Atrin/opt2-tealbrick-bridge",
+        "ref": "5765cdf5d22539d2a562efef55147828aca5debb",
+        "dockerfile": "packages/bridge-server/Dockerfile"
+      },
+      "runtime": {
+        "port": 8080,
+        "internalPort": 8788,
+        "healthPath": "/healthz",
+        "readyPath": "/readyz",
+        "volumes": [
+          {
+            "mountPath": "/data",
+            "backup": true
+          }
+        ],
+        "env": [
+          {
+            "name": "PORT",
+            "source": "fixed",
+            "value": "8080"
+          },
+          {
+            "name": "TB_INTERNAL_PORT",
+            "source": "fixed",
+            "value": "8788"
+          },
+          {
+            "name": "TB_DATA_DIR",
+            "source": "fixed",
+            "value": "/data"
+          },
+          {
+            "name": "TB_KEK",
+            "source": "provider-secret"
+          },
+          {
+            "name": "TB_PORTAL_URL",
+            "source": "portal"
+          },
+          {
+            "name": "TB_ENROL_CODE",
+            "source": "portal"
+          },
+          {
+            "name": "TB_PUBLIC_URL",
+            "source": "public-url"
+          }
+        ]
+      },
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-bridge",
+      "commit": "5765cdf5d22539d2a562efef55147828aca5debb",
+      "tag": null,
+      "publishedAt": "2026-10-12T01:45:28.705Z"
     },
     {
       "id": "rel_01M4NBMYAD3NH60WW7GCRPSJMG",
