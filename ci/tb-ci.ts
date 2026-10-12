@@ -42,9 +42,21 @@ export const INDEX_AUD = "tb:portal";
 export const MANIFEST_FILE = "tealbrick.manifest.json";
 
 export const KINDS = ["library", "service", "miniapp", "bridge", "portal", "web", "static", "desktop", "specs", "tests"] as const;
-export const OPT2_REPOS = ["specs", "sdk", "bridge", "packages", "portal-core", "portal-gui", "website", "knowledge", "connect", "tbd", "platform", "qa"].map(
-  (n) => `opt2-tealbrick-${n}`,
-);
+export const OPT2_REPOS = [
+  "specs",
+  "sdk",
+  "bridge",
+  "packages",
+  "portal-core",
+  "portal-gui",
+  "website",
+  "knowledge",
+  "connect",
+  "tbd",
+  "platform",
+  "qa",
+  "samples",
+].map((n) => `opt2-tealbrick-${n}`);
 export const MIN_TEMPLATE_PATH = "ci/MIN_TEMPLATE";
 export type Kind = (typeof KINDS)[number];
 
