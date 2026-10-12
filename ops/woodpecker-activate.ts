@@ -27,6 +27,7 @@ const REPOS = [
   "rules",
   "inbox",
   "fleet",
+  "evolution",
 ].map((n) => `opt2-tealbrick-${n}`);
 const CFG = join(homedir(), ".config/opt2-tealbrick");
 
