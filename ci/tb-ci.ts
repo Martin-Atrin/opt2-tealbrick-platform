@@ -1447,7 +1447,12 @@ async function candidateFromTag(repo: string, tag: string, commit: string): Prom
   const version = versionFromTag(tag);
   const cfgText = await rawAt(`${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
   if (!cfgText) return null;
-  const cfg = validateConfig(JSON.parse(cfgText), repo);
+  let cfg: CiConfig;
+  try {
+    cfg = validateConfig(JSON.parse(cfgText), repo);
+  } catch {
+    return null; // tag predates the current tealbrick-ci.json schema: it cannot carry Actions-built images
+  }
   const candidates: ReleaseCandidate[] = [];
   for (const im of cfg.images.filter((x) => x.kind === "app" || x.kind === "bridge")) {
     const d = await ghcrDigest(im.name, version);
