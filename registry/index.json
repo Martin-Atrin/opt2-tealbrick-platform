@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-12T01:33:27.499Z",
+  "generatedAt": "2026-10-12T01:33:55.116Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -569,6 +569,32 @@
       "tag": null,
       "publishedAt": "2026-10-11T12:10:47.273Z",
       "services": null
+    },
+    {
+      "id": "rel_01M4PVXBF7QD5HY06934C4E3SJ",
+      "product": "connect",
+      "kind": "app",
+      "version": "0.1.3",
+      "channel": "dev",
+      "manifestDigest": "sha256:4a5bb3dbba387972ed4f669dcc6d9f509428c19ce8f8570fb437e0ba4c9ff128",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-connect/0c5f8067711bec38ea368f297e9cd08bcea3843c/tealbrick.manifest.json",
+      "skillsDigest": "sha256:285f0c93bb11adc589de7d3ce43196783dc77e9429195713c73d01e102adbac6",
+      "image": null,
+      "artifact": null,
+      "source": {
+        "repo": "Martin-Atrin/opt2-tealbrick-connect",
+        "ref": "0c5f8067711bec38ea368f297e9cd08bcea3843c",
+        "dockerfile": "Dockerfile"
+      },
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-connect",
+      "commit": "0c5f8067711bec38ea368f297e9cd08bcea3843c",
+      "tag": null,
+      "publishedAt": "2026-10-12T01:33:53.512Z"
     },
     {
       "id": "rel_01M4NBEHRQ84GFT0Y316P40NJ6",
