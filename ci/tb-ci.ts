@@ -931,6 +931,9 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       const rel = await ensureRelease(PLATFORM_REPO, REGISTRY_RELEASE_TAG, false, nc.json.sha as string);
       await uploadAsset(PLATFORM_REPO, rel, "index.json", body);
       if (jws) await uploadAsset(PLATFORM_REPO, rel, "index.jws", jws);
+      // D12/C30: the public verification key set travels with the index.
+      const keysText = await ghFile("registry/keys.json", nc.json.sha as string);
+      if (keysText) await uploadAsset(PLATFORM_REPO, rel, "keys.json", keysText);
       log(`${msg}; published https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${jws ? "index.jws" : "index.json"}`);
       return;
     }
