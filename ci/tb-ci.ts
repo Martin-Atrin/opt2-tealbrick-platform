@@ -500,7 +500,6 @@ export function validateOffers(raw: unknown): Offer[] {
 }
 
 export const INTEGRITY_FILE = "tealbrick-integrity.json";
-const GH_RELEASE_TARBALL = /https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/releases\/download\/[^\s'"}]+\.tgz/g;
 
 /** S3 (C59): GitHub-release tarballs in a lockfile and whether the lockfile itself carries integrity for them. */
 export function lockfileTarballs(lockText: string, kind: "pnpm" | "npm"): { url: string; integrity: string | null }[] {
