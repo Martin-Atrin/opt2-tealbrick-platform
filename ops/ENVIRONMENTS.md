@@ -21,6 +21,7 @@ The test customer's own Railway project for the test workspace (Portal deploys b
 | Service | Source (current) |
 |---|---|
 | db-backup | Martin-Atrin/opt2-tealbrick-platform, `ops/db-backup/Dockerfile`, cron `17 19 * * *` |
+| status | Martin-Atrin/opt2-tealbrick-platform, `ops/status/Dockerfile`; public https://status-production-62da.up.railway.app (C56 D7) |
 
 ## Off limits
 v1 Railway project `tealbrick-portal` ("Tealbrick Portal"), its production environment, portal.tealbrick.com and tealbrick.com. Its `staging` environment (old dev, serves dev.tealbrick.com) is read only until the Coordinator says to scrap it.
