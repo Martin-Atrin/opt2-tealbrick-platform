@@ -95,7 +95,7 @@ export interface IndexRelease {
   skillsDigest: string | null;
   image: string | null; // ghcr.io/martin-atrin/<name>@sha256:<hex>
   artifact: { url: string; sha256: string } | null; // desktop
-  source: { repo: string; ref: string; dockerfile: string } | null; // C29 interim: dev-channel source build until ghcr images exist
+  source: { repo: string; ref: string; dockerfile: string; context?: string } | null; // C29 interim: dev-channel source build; dockerfile repo-relative, context repo-relative build root (absent = ".")
   runtime: BridgeRuntime | null; // kind bridge only (the bridge has no app manifest); apps take runtime from their manifest
   services?: { id: string; image: string }[] | null; // app image releases: one published image per manifest service with `build` (BSA-01)
   minOs: string | null; // desktop
@@ -430,7 +430,13 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
       throw new Error(`${r.product}@${r.version}: runtime is required for kind bridge and only allowed there`);
     const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
     if (old) {
-      if (old.image !== r.image || old.artifact?.sha256 !== r.artifact?.sha256 || old.manifestDigest !== r.manifestDigest || old.source?.ref !== r.source?.ref)
+      if (
+        old.image !== r.image ||
+        old.artifact?.sha256 !== r.artifact?.sha256 ||
+        old.manifestDigest !== r.manifestDigest ||
+        old.source?.ref !== r.source?.ref ||
+        (old.source?.context ?? ".") !== (r.source?.context ?? ".")
+      )
         throw new Error(`${r.product}@${r.version} is already released with other content (releases are immutable; ship a new version)`);
       continue;
     }
@@ -1527,6 +1533,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
   const repo = argValue(args, "--repo");
   const ref = argValue(args, "--ref");
   const dockerfile = argValue(args, "--dockerfile") ?? "Dockerfile";
+  const context = argValue(args, "--context") ?? ".";
   const version = argValue(args, "--version");
   const manifestPath = argValue(args, "--manifest");
   const upgradeFrom = argValue(args, "--upgrade-from") ?? "*";
@@ -1542,6 +1549,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
   if (kind !== "app" && kind !== "bridge") fail("--kind app|bridge");
   if (!repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo)) fail("--repo opt2-tealbrick-<name> required");
   if (!ref || !/^[0-9a-f]{40}$/.test(ref)) fail("--ref <full commit sha> required");
+  if (!safeRel(context) || !safeRel(dockerfile)) fail("--context and --dockerfile must be repo-relative paths without ..");
   if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) fail("--version <semver> required (source builds always go to channel dev)");
   if (kind === "app" && !manifestPath) fail(`--manifest <path to ${MANIFEST_FILE}> required for apps`);
   const raw = (path: string) => `https://raw.githubusercontent.com/${OWNER}/${repo}/${ref}/${path}`;
@@ -1560,6 +1568,10 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
     if (!v.ok) fail(`manifest invalid: ${JSON.stringify(v.errors).slice(0, 2000)}`);
     const man = v.manifest as { id?: string; version?: string; skills?: { id: string; file: string }[] };
     if (man.id !== product || man.version !== version) fail(`manifest id/version ${man.id}@${man.version} != ${product}@${version}`);
+    // SPINE-GAPS #15: manifest runtime.build paths are repo-relative and must equal the record's.
+    const mb = (v.manifest as { runtime?: { build?: { context?: string; dockerfile?: string } } }).runtime?.build;
+    if (mb && ((mb.context ?? ".") !== context || (mb.dockerfile ?? "Dockerfile") !== dockerfile))
+      fail(`manifest runtime.build {context: ${mb.context}, dockerfile: ${mb.dockerfile}} != --context ${context} --dockerfile ${dockerfile}`);
     manifestDigest = m.manifestDigest(v.manifest);
     const base = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1) : "";
     const files = new Map<string, string>();
@@ -1584,7 +1596,7 @@ async function cmdRegistryAddSource(args: string[]): Promise<void> {
       skillsDigest,
       image: null,
       artifact: null,
-      source: { repo: `${OWNER}/${repo}`, ref, dockerfile },
+      source: { repo: `${OWNER}/${repo}`, ref, dockerfile, ...(context !== "." ? { context } : {}) },
       runtime,
       services: null,
       minOs: null,
