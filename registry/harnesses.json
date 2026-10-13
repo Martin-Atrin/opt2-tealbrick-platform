@@ -94,6 +94,40 @@
     ]
   },
   {
+    "id": "claude-code",
+    "kind": "agentic_system",
+    "label": "Claude Code",
+    "icon": null,
+    "authorise": "device_approval",
+    "noAgentPath": false,
+    "instructions": [
+      {
+        "title": "Install the command line tool",
+        "detail": "On the machine that runs Claude Code, install the tealbrick command line tool from the Teal Brick releases page."
+      },
+      {
+        "title": "Connect the agent",
+        "detail": "Run this command and approve the request in the Portal page it shows (one click).",
+        "copy": {
+          "kind": "command",
+          "value": "tealbrick agent login --agent {{agentId}} --harness claude-code"
+        }
+      },
+      {
+        "title": "Add the Teal Brick tools to the agent's folder",
+        "detail": "Run this command in the folder where you start Claude Code for this agent. It shows the change to .mcp.json and asks before it writes. Only Claude Code sessions in this folder get the tools.",
+        "copy": {
+          "kind": "command",
+          "value": "tealbrick connect claude-code --agent {{agentId}} --write"
+        }
+      },
+      {
+        "title": "Start a new session",
+        "detail": "Start Claude Code in that folder and approve the Teal Brick MCP server when it asks. The tools show only the apps this agent may use."
+      }
+    ]
+  },
+  {
     "id": "eve",
     "kind": "agentic_system",
     "label": "Eve agent",

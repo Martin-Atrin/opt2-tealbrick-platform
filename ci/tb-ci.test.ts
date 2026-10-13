@@ -286,6 +286,14 @@ test("harnesses validation (frozen HarnessOption, C40a)", () => {
   );
 });
 
+test("the committed registry/harnesses.json is valid and has a claude-code row (F75)", () => {
+  const rows = validateHarnesses(JSON.parse(readFileSync(new URL("../registry/harnesses.json", import.meta.url), "utf8")));
+  const cc = rows.find((r) => r.id === "claude-code");
+  assert.ok(cc, "claude-code row");
+  assert.equal(cc.authorise, "device_approval");
+  assert.ok(cc.instructions.some((st) => st.copy?.value.includes("--harness claude-code")));
+});
+
 test("C42: VOLUME instruction detection", () => {
   assert.deepEqual(dockerfileVolumeLines('FROM node\nVOLUME ["/data"]\nCMD x'), [2]);
   assert.deepEqual(dockerfileVolumeLines("FROM node\n  volume /data\n"), [2]);
