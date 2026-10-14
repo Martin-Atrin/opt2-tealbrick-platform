@@ -2,7 +2,8 @@
 // 1. writes a canary row (schema tb_ops), 2. pg_dump -Fc into BACKUP_DIR,
 // 3. restores the dump into a scratch database on the same server and verifies it
 //    (same table set, canary row present, row counts reported), 4. drops the scratch database,
-// 5. prunes old dumps, 6. appends a result line to BACKUP_DIR/RESTORE-LOG.jsonl,
+// 5. retention (PLAT-01): a passing restore prunes old dumps (keep KEEP); a FAILING restore deletes its own dump and
+//    prunes nothing, so a run of failing nights never replaces the good dumps, 6. appends a result line to BACKUP_DIR/RESTORE-LOG.jsonl,
 // 7. pings the monitoring heartbeat on success only (a missing ping raises the alert).
 // Env: DATABASE_URL (Railway reference to Postgres), BACKUP_DIR (volume mount), KEEP (default 14),
 //      HEARTBEAT_URL (optional). Never logs the connection string or row contents.
@@ -11,6 +12,23 @@ import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:f
 import { join } from "node:path";
 
 const SCRATCH_DB = "tb_restore_test";
+
+/**
+ * PLAT-01: dump retention after the restore test. ok → keep the newest `keep` dumps (incl. this one); not ok → delete
+ * this run's dump only and prune nothing (the earlier good dumps stay). Returns the removed file names.
+ */
+export function retain(dir: string, dump: string, ok: boolean, keep: number): string[] {
+  if (!ok) {
+    rmSync(join(dir, dump), { force: true });
+    return [dump];
+  }
+  const dumps = readdirSync(dir)
+    .filter((f) => /^portal-.*\.dump$/.test(f))
+    .sort();
+  const old = dumps.slice(0, Math.max(0, dumps.length - Math.max(1, keep)));
+  for (const f of old) rmSync(join(dir, f));
+  return old;
+}
 
 function env(name: string, fallback?: string): string {
   const v = process.env[name] ?? fallback;
@@ -99,16 +117,16 @@ async function main(): Promise<void> {
     ok = missing.length === 0 && canaryRestored;
     const rows = [...dst.values()].reduce((a, b) => a + b, 0);
     detail = `tables=${dst.size} rows=${rows} missing=${missing.join(",") || "-"} canary=${canaryRestored ? "ok" : "MISSING"}`;
+  } catch (e) {
+    // a restore that errors is a failed restore test: same retention rule, same log line, same exit 1
+    detail = `restore error: ${(e as Error).message.slice(0, 300)}`;
   } finally {
     psql(adminUrl, `drop database if exists ${SCRATCH_DB}`);
   }
 
-  const dumps = readdirSync(dir)
-    .filter((f) => /^portal-.*\.dump$/.test(f))
-    .sort();
-  for (const old of dumps.slice(0, Math.max(0, dumps.length - keep))) rmSync(join(dir, old));
-
-  const result = { at: new Date().toISOString(), dump: file.split("/").pop(), bytes: size, restore: ok ? "pass" : "FAIL", detail, ms: Date.now() - started };
+  const dump = file.split("/").pop() as string;
+  const removed = retain(dir, dump, ok, keep);
+  const result = { at: new Date().toISOString(), dump, bytes: size, restore: ok ? "pass" : "FAIL", detail, removed: removed.length, ms: Date.now() - started };
   appendFileSync(join(dir, "RESTORE-LOG.jsonl"), `${JSON.stringify(result)}\n`);
   console.log(`db-backup: ${JSON.stringify(result)}`);
   if (!ok) process.exit(1);
@@ -119,7 +137,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e: unknown) => {
-  console.error(`db-backup: FAIL: ${(e as Error).message}`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((e: unknown) => {
+    console.error(`db-backup: FAIL: ${(e as Error).message}`);
+    process.exit(1);
+  });
+}
