@@ -103,7 +103,7 @@
     "instructions": [
       {
         "title": "Install the command line tool",
-        "detail": "On the machine that runs Claude Code, install the tealbrick command line tool from the Teal Brick releases page."
+        "detail": "On the machine that runs Claude Code, install the tealbrick command line tool (0.1.20 or later) from the Teal Brick releases page."
       },
       {
         "title": "Connect the agent",
@@ -114,8 +114,8 @@
         }
       },
       {
-        "title": "Add the Teal Brick tools to the agent's folder",
-        "detail": "Run this command in the folder where you start Claude Code for this agent. It shows the change to .mcp.json and asks before it writes. Only Claude Code sessions in this folder get the tools.",
+        "title": "Add the Teal Brick tools to the agent's folder (project scope)",
+        "detail": "Run this command in the folder where you start Claude Code for this agent, or add --project <folder>. It writes .mcp.json in that folder (project scope) with the full paths of this install's node and tealbrick, so Claude Code needs nothing on PATH. It shows the change and asks before it writes. Only Claude Code sessions in this folder get the tools. Run it again after you move or update the tool.",
         "copy": {
           "kind": "command",
           "value": "tealbrick connect claude-code --agent {{agentId}} --write"
