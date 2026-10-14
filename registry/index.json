@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T07:12:02.603Z",
+  "generatedAt": "2026-10-14T07:59:23.590Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -4741,14 +4741,14 @@
     {
       "id": "tbd-default",
       "kind": "desktop",
-      "label": "Teal Brick desktop app",
+      "label": "Tealbrick desktop app",
       "icon": null,
       "authorise": "device_approval",
       "noAgentPath": true,
       "instructions": [
         {
           "title": "Open the desktop app",
-          "detail": "Open the Teal Brick desktop app on your Mac and sign in with your Portal account."
+          "detail": "Open the Tealbrick desktop app on your Mac and sign in with your Portal account."
         },
         {
           "title": "Approve the agent",
@@ -4770,7 +4770,7 @@
       "instructions": [
         {
           "title": "Add a custom connector",
-          "detail": "In Claude Desktop open Settings, then Connectors, then Add custom connector. Name it Teal Brick and paste this URL.",
+          "detail": "In Claude Desktop open Settings, then Connectors, then Add custom connector. Name it Tealbrick and paste this URL.",
           "copy": {
             "kind": "url",
             "value": "{{mcpUrl}}"
@@ -4790,7 +4790,7 @@
         },
         {
           "title": "Start a new chat",
-          "detail": "Start a new chat so Claude loads the Teal Brick tools and skills. The connector shows only the apps this agent may use."
+          "detail": "Start a new chat so Claude loads the Tealbrick tools and skills. The connector shows only the apps this agent may use."
         }
       ]
     },
@@ -4828,7 +4828,7 @@
         },
         {
           "title": "Start a new session",
-          "detail": "Start a new Codex session so it loads the Teal Brick tools."
+          "detail": "Start a new Codex session so it loads the Tealbrick tools."
         }
       ]
     },
@@ -4842,7 +4842,7 @@
       "instructions": [
         {
           "title": "Install the command line tool",
-          "detail": "On the machine that runs Claude Code, install the tealbrick command line tool (0.1.20 or later) from the Teal Brick releases page."
+          "detail": "On the machine that runs Claude Code, install the tealbrick command line tool (0.1.20 or later) from the Tealbrick releases page."
         },
         {
           "title": "Connect the agent",
@@ -4853,7 +4853,7 @@
           }
         },
         {
-          "title": "Add the Teal Brick tools to the agent's folder (project scope)",
+          "title": "Add the Tealbrick tools to the agent's folder (project scope)",
           "detail": "Run this command in the folder where you start Claude Code for this agent, or add --project <folder>. It writes .mcp.json in that folder (project scope) with the full paths of this install's node and tealbrick, so Claude Code needs nothing on PATH. It shows the change and asks before it writes. Only Claude Code sessions in this folder get the tools. Run it again after you move or update the tool.",
           "copy": {
             "kind": "command",
@@ -4862,7 +4862,7 @@
         },
         {
           "title": "Start a new session",
-          "detail": "Start Claude Code in that folder and approve the Teal Brick MCP server when it asks. The tools show only the apps this agent may use."
+          "detail": "Start Claude Code in that folder and approve the Tealbrick MCP server when it asks. The tools show only the apps this agent may use."
         }
       ]
     },
@@ -4876,7 +4876,7 @@
       "instructions": [
         {
           "title": "Install the command line tool",
-          "detail": "On the machine that runs the Eve agent, install the tealbrick command line tool from the Teal Brick releases page."
+          "detail": "On the machine that runs the Eve agent, install the tealbrick command line tool from the Tealbrick releases page."
         },
         {
           "title": "Connect the agent",
@@ -4902,7 +4902,7 @@
       "instructions": [
         {
           "title": "Install the command line tool",
-          "detail": "On the agent's machine, install the tealbrick command line tool from the Teal Brick releases page."
+          "detail": "On the agent's machine, install the tealbrick command line tool from the Tealbrick releases page."
         },
         {
           "title": "Connect the agent",
