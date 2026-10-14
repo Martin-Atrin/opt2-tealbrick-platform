@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T00:55:25.969Z",
+  "generatedAt": "2026-10-14T01:13:25.600Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -3273,6 +3273,45 @@
       "publishedAt": "2026-10-13T00:15:29.242Z"
     },
     {
+      "id": "rel_01M4VZGHJFG3TR9DYFHZ10ZAXH",
+      "product": "knowledge",
+      "kind": "app",
+      "version": "0.1.16",
+      "channel": "stable",
+      "manifestDigest": "sha256:234dccf0ef1c754c1e4ae71057bd07ead995fb21aa728a0b7d6afa84d7729186",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/d5101cc1d8e0e7caeabe7cbfc3c51d854aa95750/tealbrick.manifest.json",
+      "skillsDigest": "sha256:fd1df5fa304bed11d7674033a93bc80343ac68a2b016a1bdbceef82b41a89978",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge@sha256:d84d8b07a048bf3ce2fda5c3a44c76a6ee29efdfb698289d035a881af7d608f2",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [
+        {
+          "id": "gbrain",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-gbrain@sha256:43e783b2e5282c3358717e554b33d07710d2f81c28409b651939f96dd7581b27"
+        },
+        {
+          "id": "gbrain-db",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-gbrain-db@sha256:8ead718c186601df5340f96c0e3e895edd905a95a389e193c6da9b98d7a03a6d"
+        },
+        {
+          "id": "notebook",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-notebook@sha256:853eb9e78aad6f31f000ed56770373b253ce647aa8cd0e5a3bfb50a33c53b278"
+        },
+        {
+          "id": "notebook-db",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-notebook-db@sha256:13e2484810547528c6c8b87b56edd18edd6cbb5b04c9b6591cba078c7e499b1d"
+        }
+      ],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
+      "commit": "d5101cc1d8e0e7caeabe7cbfc3c51d854aa95750",
+      "tag": "v0.1.16",
+      "publishedAt": "2026-10-14T01:13:00.239Z"
+    },
+    {
       "id": "rel_01M4QYD00KZPTQHX511A1G099X",
       "product": "rules",
       "kind": "app",
@@ -4045,7 +4084,7 @@
       "instructions": [
         {
           "title": "Install the command line tool",
-          "detail": "On the machine that runs Claude Code, install the tealbrick command line tool from the Teal Brick releases page."
+          "detail": "On the machine that runs Claude Code, install the tealbrick command line tool (0.1.20 or later) from the Teal Brick releases page."
         },
         {
           "title": "Connect the agent",
@@ -4056,8 +4095,8 @@
           }
         },
         {
-          "title": "Add the Teal Brick tools to the agent's folder",
-          "detail": "Run this command in the folder where you start Claude Code for this agent. It shows the change to .mcp.json and asks before it writes. Only Claude Code sessions in this folder get the tools.",
+          "title": "Add the Teal Brick tools to the agent's folder (project scope)",
+          "detail": "Run this command in the folder where you start Claude Code for this agent, or add --project <folder>. It writes .mcp.json in that folder (project scope) with the full paths of this install's node and tealbrick, so Claude Code needs nothing on PATH. It shows the change and asks before it writes. Only Claude Code sessions in this folder get the tools. Run it again after you move or update the tool.",
           "copy": {
             "kind": "command",
             "value": "tealbrick connect claude-code --agent {{agentId}} --write"
