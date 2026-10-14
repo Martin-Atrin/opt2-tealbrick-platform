@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-13T15:09:00.982Z",
+  "generatedAt": "2026-10-14T00:55:25.969Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -2075,6 +2075,28 @@
       "publishedAt": "2026-10-13T15:08:37.682Z"
     },
     {
+      "id": "rel_01M4VYFE5FZTB2712GZD0HZCWM",
+      "product": "connect",
+      "kind": "app",
+      "version": "0.5.4",
+      "channel": "stable",
+      "manifestDigest": "sha256:f94ffb89a75c7af930282715308610c27759cdeca274d3d217e02524f65a3dbb",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-connect/f4ad425975e97a3237e81d4c43810612f2a94692/tealbrick.manifest.json",
+      "skillsDigest": "sha256:f0d8e981efce90c605ab0a072a318e3bce84ef16951b17ce63e48c20ba0fbafe",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-connect@sha256:8b0a5adb38a0db2e8735849725fa222e0e289b39e7d6f96114a2f0f5ca992e1d",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-connect",
+      "commit": "f4ad425975e97a3237e81d4c43810612f2a94692",
+      "tag": "v0.5.4",
+      "publishedAt": "2026-10-14T00:54:55.407Z"
+    },
+    {
       "id": "rel_01M4QYD1Y4FWVHZ98EG07BGTVS",
       "product": "evolution",
       "kind": "app",
@@ -2227,6 +2249,28 @@
       "commit": "8e1d154a05905ca771b7fdc4e079f08e0b767ed8",
       "tag": "v0.2.5",
       "publishedAt": "2026-10-13T00:15:45.015Z"
+    },
+    {
+      "id": "rel_01M4VYG7PEA645HECVVPG5M5V2",
+      "product": "evolution",
+      "kind": "app",
+      "version": "0.2.6",
+      "channel": "stable",
+      "manifestDigest": "sha256:dcbe85765c59879fd33d4b5fff3c8a9ac556ba8aed21855d1afccce1d140efbe",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-evolution/7f66bd78f7e33b493dcd13044b4d8dd95568ecc8/tealbrick.manifest.json",
+      "skillsDigest": "sha256:32f9347d4a070892642788bc1c39e9ea5db5175371f4e38941798ac45745cfc3",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-evolution@sha256:a6994f3d0b579fd2cc0e9d94d086a344aca85ee144344645d8f19698f79ec16d",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-evolution",
+      "commit": "7f66bd78f7e33b493dcd13044b4d8dd95568ecc8",
+      "tag": "v0.2.6",
+      "publishedAt": "2026-10-14T00:55:21.550Z"
     },
     {
       "id": "rel_01M4R0PQ315GA2DFCNNRG1M5AP",
