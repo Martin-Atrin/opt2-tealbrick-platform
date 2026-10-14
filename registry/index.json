@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T02:27:56.580Z",
+  "generatedAt": "2026-10-14T02:40:19.732Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -1687,6 +1687,76 @@
       "publishedAt": "2026-10-13T14:43:39.522Z"
     },
     {
+      "id": "rel_01M4W4F60PN3PT3A73F1PD60FY",
+      "product": "bridge",
+      "kind": "bridge",
+      "version": "0.1.26",
+      "channel": "stable",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-bridge-server@sha256:3ede4956b29c9097248888b2cd56ddee19f4faafafe17fd6b1317154a5d77978",
+      "artifact": null,
+      "source": null,
+      "runtime": {
+        "port": 8080,
+        "internalPort": 8788,
+        "healthPath": "/healthz",
+        "readyPath": "/readyz",
+        "volumes": [
+          {
+            "mountPath": "/data",
+            "backup": true
+          }
+        ],
+        "env": [
+          {
+            "name": "PORT",
+            "source": "fixed",
+            "value": "8080"
+          },
+          {
+            "name": "TB_INTERNAL_PORT",
+            "source": "fixed",
+            "value": "8788"
+          },
+          {
+            "name": "TB_DATA_DIR",
+            "source": "fixed",
+            "value": "/data"
+          },
+          {
+            "name": "TB_KEK",
+            "source": "provider-secret"
+          },
+          {
+            "name": "TB_PORTAL_URL",
+            "source": "portal"
+          },
+          {
+            "name": "TB_ENROL_CODE",
+            "source": "portal"
+          },
+          {
+            "name": "TB_PUBLIC_URL",
+            "source": "public-url"
+          },
+          {
+            "name": "TB_KEYS_PUBLIC_URL",
+            "source": "public-url-keys"
+          }
+        ]
+      },
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-bridge",
+      "commit": "74c354002a3f2a15c77a53dd5f0a2133c4c72b02",
+      "tag": "v0.1.26",
+      "publishedAt": "2026-10-14T02:39:38.518Z"
+    },
+    {
       "id": "rel_01M4NBMYAD3NH60WW7GCRPSJMG",
       "product": "connect",
       "kind": "app",
@@ -2337,6 +2407,28 @@
       "commit": "ead92d614576eeb68891e53ef3ff42f018e7b40d",
       "tag": "v0.2.7",
       "publishedAt": "2026-10-14T01:55:32.447Z"
+    },
+    {
+      "id": "rel_01M4W4GABX421RFKB2T4KDSG66",
+      "product": "evolution",
+      "kind": "app",
+      "version": "0.2.8",
+      "channel": "stable",
+      "manifestDigest": "sha256:240c16888490b48cbeda5b59ae04c3a8a6ca11145cb89d9625e114b557a5f270",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-evolution/3598926809e274a51943f9d784bd61ad7be80e17/tealbrick.manifest.json",
+      "skillsDigest": "sha256:32f9347d4a070892642788bc1c39e9ea5db5175371f4e38941798ac45745cfc3",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-evolution@sha256:8160cbdc1feb422629cfc15ffae31e1f0694c9a1495816700b1d18a3318f87d7",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-evolution",
+      "commit": "3598926809e274a51943f9d784bd61ad7be80e17",
+      "tag": "v0.2.8",
+      "publishedAt": "2026-10-14T02:40:15.742Z"
     },
     {
       "id": "rel_01M4R0PQ315GA2DFCNNRG1M5AP",
