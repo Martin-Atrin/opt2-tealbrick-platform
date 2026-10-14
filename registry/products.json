@@ -1,5 +1,6 @@
 {
   "bridge": { "repo": "Martin-Atrin/opt2-tealbrick-bridge", "kind": "bridge" },
+  "cli": { "repo": "Martin-Atrin/opt2-tealbrick-cli", "kind": "cli" },
   "connect": { "repo": "Martin-Atrin/opt2-tealbrick-connect", "kind": "app" },
   "evolution": { "repo": "Martin-Atrin/opt2-tealbrick-evolution", "kind": "app" },
   "fleet": { "repo": "Martin-Atrin/opt2-tealbrick-fleet", "kind": "app" },

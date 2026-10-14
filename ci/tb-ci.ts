@@ -109,17 +109,28 @@ export interface CiConfig {
 
 /** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
 export type Channel = "stable" | "dev";
+/** Kinds of release-index entries. C174: `cli` = the tealbrick CLI tarball the C173 installer and `tealbrick self-update` verify.
+ *  Readers skip kinds they do not know (L24); Core indexes app/bridge/desktop only. */
+export const INDEX_KINDS = ["app", "bridge", "desktop", "cli"] as const;
+export type IndexKind = (typeof INDEX_KINDS)[number];
+/** A downloadable release file. `sha256` is `sha256:<hex>`; `integrity` (C174, required for kind cli) is the npm/pnpm lockfile
+ *  value `sha512-<base64>` of the same bytes (the `.integrity` asset, ci-v9.5). */
+export interface ReleaseArtifact {
+  url: string;
+  sha256: string;
+  integrity?: string;
+}
 export interface IndexRelease {
   id: string; // rel_<ULID>
   product: string;
-  kind: "app" | "bridge" | "desktop";
+  kind: IndexKind;
   version: string;
   channel: Channel;
   manifestDigest: string | null;
   manifestUrl: string | null;
   skillsDigest: string | null;
   image: string | null; // ghcr.io/martin-atrin/<name>@sha256:<hex>
-  artifact: { url: string; sha256: string } | null; // desktop
+  artifact: ReleaseArtifact | null; // desktop, cli (C174)
   source: { repo: string; ref: string; dockerfile: string; context?: string } | null; // C29 interim: dev-channel source build; dockerfile repo-relative, context repo-relative build root (absent = ".")
   runtime: BridgeRuntime | null; // kind bridge only (the bridge has no app manifest); apps take runtime from their manifest
   services?: { id: string; image: string }[] | null; // app image releases: one published image per manifest service with `build` (BSA-01)
@@ -688,7 +699,7 @@ export interface ProductBinding {
 }
 export type ProductBindings = Record<string, ProductBinding>;
 
-/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop" } }. */
+/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop"|"cli" } }. */
 export function validateProducts(raw: unknown): ProductBindings {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("products.json must be an object { product: { repo, kind } }");
   const out: ProductBindings = {};
@@ -699,7 +710,7 @@ export function validateProducts(raw: unknown): ProductBindings {
       throw new Error(`products.json ${product}: fields must be exactly repo, kind`);
     if (typeof b.repo !== "string" || !new RegExp(`^${OWNER}/opt2-tealbrick-[a-z0-9-]+$`).test(b.repo))
       throw new Error(`products.json ${product}: repo must be ${OWNER}/opt2-tealbrick-<name>`);
-    if (!["app", "bridge", "desktop"].includes(b.kind as string)) throw new Error(`products.json ${product}: kind must be app, bridge or desktop`);
+    if (!(INDEX_KINDS as readonly string[]).includes(b.kind as string)) throw new Error(`products.json ${product}: kind must be ${INDEX_KINDS.join(", ")}`);
     out[product] = { repo: b.repo, kind: b.kind as ProductBinding["kind"] };
   }
   return out;
@@ -712,6 +723,202 @@ export function productBindingProblem(bindings: ProductBindings, r: { product: s
   if (r.repo !== b.repo) return `${r.product} is bound to ${b.repo}; a release from ${r.repo ?? "no repo"} is refused (GTP-01)`;
   if (r.kind !== b.kind) return `${r.product} is bound as kind ${b.kind}; a ${r.kind} release is refused (GTP-01)`;
   return null;
+}
+
+// ---------- C174: the `cli` release-index kind (C173 one-line installer + `tealbrick self-update`) ----------
+
+/** The private CLI repo (C173). Its releases are read ONLY by the signer's cli source, with a read-only token (C164). */
+export const CLI_REPO = "opt2-tealbrick-cli";
+export const CLI_PRODUCT = "cli";
+export const CLI_PACKAGE = "@opt2-tealbrick/cli";
+/** Release tags of the CLI package: `cli-v<semver>` (template package tags, `<package dir>-v<semver>`). */
+export const CLI_TAG_DIR = "cli";
+/** Where the index points a cli tarball: a platform dist host, never the private GitHub repo (C164 pull mirror). The platform
+ *  picks the host, not the product repo (SEC-03); change by platform PR (releases.tealbrick.com at cutover). */
+export const CLI_DIST_BASE: string = DIST_BASES[0] as string;
+/** Env name of the fine-grained READ-only token (contents + releases of the private repos) Martin creates (C164). Absent = the
+ *  cli source is pending: registry-sync stays green and the index has no cli entry. */
+export const PRIVATE_READ_TOKEN_ENV = "TB_PRIVATE_READ_TOKEN";
+
+const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
+const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
+
+/** The only accepted URL of a cli tarball: `<dist base>/opt2-tealbrick-cli-cli-v<ver>/opt2-tealbrick-cli-<ver>.tgz`. */
+export function cliTarballUrl(version: string, distBase: string = CLI_DIST_BASE): string {
+  return releaseUrl(CLI_REPO, CLI_TAG_DIR, CLI_PACKAGE, version, distBase);
+}
+
+/** C174: what is wrong with a cli index entry (null = fine). Writers stay strict (L24): a dist-host URL that matches the version,
+ *  `sha256:<hex>` + `sha512-<base64>` integrity, and nothing that belongs to other kinds. */
+export function cliEntryProblem(r: IndexRelease): string | null {
+  if (r.kind !== "cli") return "not a cli entry";
+  const a = r.artifact;
+  if (!a || typeof a !== "object") return "a cli release needs artifact {url, sha256, integrity}";
+  const extra = Object.keys(a).filter((k) => !["url", "sha256", "integrity"].includes(k));
+  if (extra.length) return `artifact has unknown field(s) ${extra.join(", ")}`;
+  if (typeof a.url !== "string" || !DIST_BASES.some((b) => a.url.startsWith(`${b}/`)))
+    return `artifact.url must be on a platform dist host (${DIST_BASES.join(", ")}), never a private GitHub URL; got ${JSON.stringify(a.url)}`;
+  if (!DIST_BASES.some((b) => a.url === cliTarballUrl(r.version, b)))
+    return `artifact.url must be <dist base>/${CLI_REPO}-${CLI_TAG_DIR}-v${r.version}/${tarballName(CLI_PACKAGE, r.version)}; got ${a.url}`;
+  if (typeof a.sha256 !== "string" || !SHA256_RE.test(a.sha256)) return "artifact.sha256 must be sha256:<64 hex>";
+  if (a.integrity === undefined) return "artifact.integrity (sha512-<base64>) is required for kind cli";
+  if (typeof a.integrity !== "string" || !SHA512_INTEGRITY_RE.test(a.integrity)) return "artifact.integrity must be sha512-<88 base64 chars>";
+  if (r.image || r.source || r.runtime || r.services?.length || r.manifestDigest || r.manifestUrl || r.skillsDigest)
+    return "a cli release carries only the artifact (no image, source, runtime, services or manifest)";
+  if (r.minOs !== null || r.notarized !== null) return "minOs/notarized are desktop fields";
+  return null;
+}
+
+/** C174: builds the cli entry from the release assets of tag `cli-v<version>` the signer downloaded itself. It trusts no
+ *  product-written digest: it hashes the tarball, requires the `.sha256` and `.integrity` assets to agree, and requires the
+ *  packed package.json to be @opt2-tealbrick/cli at this version with a `tealbrick` bin. Pure; returns the entry or a rejection. */
+export function cliReleaseFromAssets(input: {
+  version: string;
+  commit: string;
+  tgz: Uint8Array;
+  sha256File: string;
+  integrityFile: string;
+  distBase?: string;
+  publishedAt: string;
+  id?: string;
+}): IndexRelease | string {
+  const { version, commit, tgz } = input;
+  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) return `bad version ${JSON.stringify(version)}`;
+  if (!/^[0-9a-f]{40}$/.test(commit)) return "commit must be a full sha";
+  const name = tarballName(CLI_PACKAGE, version);
+  const sums = assetChecksums(name, tgz);
+  const listed = input.sha256File.trim().split(/\s+/);
+  if (listed[0] !== sums.sha256 || (listed[1] !== undefined && listed[1].replace(/^\*/, "") !== name))
+    return `${name}.sha256 does not match the tarball (tarball sha256 ${sums.sha256})`;
+  if (input.integrityFile.trim() !== sums.integrity) return `${name}.integrity does not match the tarball`;
+  let pkg: { name?: unknown; version?: unknown; bin?: unknown };
+  try {
+    const raw = tarEntries(tgz).get("package.json");
+    if (!raw) return `${name} has no package/package.json`;
+    pkg = JSON.parse(raw.toString("utf8"));
+  } catch (e) {
+    return `${name} is not a readable npm tarball: ${(e as Error).message}`;
+  }
+  if (pkg.name !== CLI_PACKAGE || pkg.version !== version) return `${name} contains ${String(pkg.name)}@${String(pkg.version)}, not ${CLI_PACKAGE}@${version}`;
+  const bin = pkg.bin as Record<string, unknown> | undefined;
+  if (!bin || typeof bin !== "object" || typeof bin.tealbrick !== "string") return `${name} has no "tealbrick" bin`;
+  const entry: IndexRelease = {
+    id: input.id ?? newId("rel"),
+    product: CLI_PRODUCT,
+    kind: "cli",
+    version,
+    channel: releaseChannel(CLI_PRODUCT, version),
+    manifestDigest: null,
+    manifestUrl: null,
+    skillsDigest: null,
+    image: null,
+    artifact: { url: cliTarballUrl(version, input.distBase ?? CLI_DIST_BASE), sha256: `sha256:${sums.sha256}`, integrity: sums.integrity },
+    source: null,
+    runtime: null,
+    services: null,
+    minOs: null,
+    notarized: null,
+    upgradeFrom: "*",
+    repo: `${OWNER}/${CLI_REPO}`,
+    commit,
+    tag: `${CLI_TAG_DIR}-v${version}`,
+    publishedAt: input.publishedAt,
+  };
+  return cliEntryProblem(entry) ?? entry;
+}
+
+export interface CliSourceResult {
+  add: IndexRelease[];
+  rejected: string[];
+  /** why the source was skipped as a whole (null = it ran) */
+  pending: string | null;
+}
+
+/** C174 signer source: cli-v* releases of the private CLI repo, read with the read-only token (C164). Without the token, or
+ *  while the repo is in PENDING_REPOS and not visible, it is PENDING (no entry, no failure). A release without the tarball
+ *  asset yet is pending too. Any other answer is a rejection (registry-sync fails loudly, as for other sources). The token
+ *  goes to api.github.com only; asset downloads follow GitHub's redirect, and fetch drops the authorization header on the
+ *  cross-origin hop. */
+export async function cliSourceReleases(opts: {
+  token: string | undefined;
+  known: Set<string>;
+  fetcher?: typeof fetch;
+  now?: () => string;
+  distBase?: string;
+}): Promise<CliSourceResult> {
+  const out: CliSourceResult = { add: [], rejected: [], pending: null };
+  if (!opts.token) {
+    out.pending = `no ${PRIVATE_READ_TOKEN_ENV} (C164: Martin's read-only token for the private repos)`;
+    return out;
+  }
+  const fetcher = opts.fetcher ?? fetch;
+  const api = (path: string, accept = "application/vnd.github+json") =>
+    fetcher(`https://api.github.com${path}`, {
+      headers: { authorization: `Bearer ${opts.token}`, accept, "x-github-api-version": "2022-11-28" },
+      redirect: "follow",
+    });
+  const base = `/repos/${OWNER}/${CLI_REPO}`;
+  const tagsRes = await api(`${base}/tags?per_page=100`);
+  if (tagsRes.status === 404 && PENDING_REPOS.includes(CLI_REPO)) {
+    out.pending = `${CLI_REPO} is not visible to the read token (PENDING_REPOS)`;
+    return out;
+  }
+  if (tagsRes.status !== 200) {
+    out.rejected.push(`${CLI_REPO}: list tags with the read token: HTTP ${tagsRes.status}`);
+    return out;
+  }
+  const tags = (await tagsRes.json()) as { name: string; commit: { sha: string } }[];
+  const tagRe = new RegExp(`^${CLI_TAG_DIR}-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$`);
+  for (const t of tags) {
+    const m = tagRe.exec(t.name);
+    if (!m) continue;
+    const version = m[1] as string;
+    const key = `${CLI_PRODUCT}@${version}@${releaseChannel(CLI_PRODUCT, version)}`;
+    if (opts.known.has(key)) continue;
+    const where = `${CLI_REPO} ${t.name}`;
+    try {
+      const relRes = await api(`${base}/releases/tags/${encodeURIComponent(t.name)}`);
+      if (relRes.status === 404) continue; // tag pushed, release Action not done yet: pending
+      if (relRes.status !== 200) {
+        out.rejected.push(`${where}: read release: HTTP ${relRes.status}`);
+        continue;
+      }
+      const assets = ((await relRes.json()) as { assets?: { id: number; name: string }[] }).assets ?? [];
+      const name = tarballName(CLI_PACKAGE, version);
+      const find = (n: string) => assets.find((a) => a.name === n);
+      const tgzAsset = find(name);
+      if (!tgzAsset) continue; // not uploaded yet: pending
+      const shaAsset = find(`${name}.sha256`);
+      const intAsset = find(`${name}.integrity`);
+      if (!shaAsset || !intAsset) {
+        out.rejected.push(`${where}: ${name} has no .sha256/.integrity asset (template ci-v9.5+)`);
+        continue;
+      }
+      const get = async (id: number): Promise<Uint8Array> => {
+        const r = await api(`${base}/releases/assets/${id}`, "application/octet-stream");
+        if (!r.ok) throw new Error(`download asset ${id}: HTTP ${r.status}`);
+        return new Uint8Array(await r.arrayBuffer());
+      };
+      const text = (b: Uint8Array) => Buffer.from(b).toString("utf8");
+      const r = cliReleaseFromAssets({
+        version,
+        commit: t.commit.sha,
+        tgz: await get(tgzAsset.id),
+        sha256File: text(await get(shaAsset.id)),
+        integrityFile: text(await get(intAsset.id)),
+        distBase: opts.distBase,
+        publishedAt: (opts.now ?? (() => new Date().toISOString()))(),
+      });
+      if (typeof r === "string") out.rejected.push(`${where}: ${r}`);
+      else {
+        out.add.push(r);
+        opts.known.add(key);
+      }
+    } catch (e) {
+      out.rejected.push(`${where}: ${(e as Error).message}`);
+    }
+  }
+  return out;
 }
 
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
@@ -730,9 +937,15 @@ export function mergeIndex(
   for (const r of add) {
     if (r.channel === "stable" && isDevOnlyProduct(r.product))
       throw new Error(`${r.product}@${r.version}: ${r.product} is dev-only (DEV_ONLY_PRODUCTS); the signer refuses a stable release`);
-    if (r.kind !== "desktop" && r.channel === "stable" && !r.image)
+    if (!(INDEX_KINDS as readonly string[]).includes(r.kind)) throw new Error(`${r.product}@${r.version}: unknown kind ${JSON.stringify(r.kind)}`);
+    const fileKind = r.kind === "desktop" || r.kind === "cli"; // released as a downloadable file, not an image
+    if (!fileKind && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
-    if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
+    if (!fileKind && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
+    if (r.kind === "cli") {
+      const problem = cliEntryProblem(r);
+      if (problem) throw new Error(`${r.product}@${r.version}: ${problem}`);
+    }
     if ((r.kind === "bridge") !== (r.runtime !== null && r.runtime !== undefined))
       throw new Error(`${r.product}@${r.version}: runtime is required for kind bridge and only allowed there`);
     if (bindings) {
@@ -747,6 +960,8 @@ export function mergeIndex(
       if (
         old.image !== r.image ||
         old.artifact?.sha256 !== r.artifact?.sha256 ||
+        old.artifact?.integrity !== r.artifact?.integrity ||
+        (r.kind === "cli" && old.artifact?.url !== r.artifact?.url) ||
         old.manifestDigest !== r.manifestDigest ||
         old.source?.ref !== r.source?.ref ||
         (old.source?.context ?? ".") !== (r.source?.context ?? ".")
@@ -1973,6 +2188,7 @@ async function cmdRegistrySync(): Promise<void> {
   const rejected: string[] = [];
   const bindings = loadProductBindings();
   for (const repo of OPT2_REPOS) {
+    if (repo === CLI_REPO) continue; // C174: private; read below by the cli source with the read-only token, never with GITHUB_TOKEN
     const tags = await gh("GET", `/repos/${OWNER}/${repo}/tags?per_page=50`);
     if (tags.status === 404 && PENDING_REPOS.includes(repo)) {
       log(`registry-sync: ${repo} has no GitHub repo yet (PENDING_REPOS); skipped`);
@@ -2007,6 +2223,18 @@ async function cmdRegistrySync(): Promise<void> {
       }
     }
   }
+  // C174: the cli tarball (C173 installer). Pending (green, no entry) until Martin's read token exists.
+  const cli = await cliSourceReleases({ token: process.env[PRIVATE_READ_TOKEN_ENV] || undefined, known });
+  if (cli.pending) log(`registry-sync: PEND cli source: ${cli.pending}; no cli entry this run`);
+  for (const r of cli.add) {
+    const bound = productBindingProblem(bindings, r);
+    if (bound) rejected.push(`${CLI_REPO} ${r.tag} ${r.product}: ${bound}`);
+    else {
+      add.push(r);
+      log(`verified ${r.product}@${r.version} from ${CLI_REPO}@${(r.commit ?? "").slice(0, 8)} (${r.artifact?.url})`);
+    }
+  }
+  rejected.push(...cli.rejected);
   const offersText = await ghFile(OFFERS_PATH, "main");
   const harnessesText = await ghFile(HARNESSES_PATH, "main");
   const offersChanged = JSON.stringify(validateOffers(offersText ? JSON.parse(offersText) : [])) !== JSON.stringify(index?.offers ?? []);

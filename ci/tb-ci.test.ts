@@ -11,17 +11,24 @@ import {
   artifactSource,
   assetChecksums,
   belowMinimum,
+  CLI_DIST_BASE,
+  CLI_REPO,
   channelForVersion,
   checkDependencies,
   checkPackageJson,
   checkPackedTarball,
   checkServiceImages,
+  cliEntryProblem,
+  cliReleaseFromAssets,
+  cliSourceReleases,
+  cliTarballUrl,
   DEV_ONLY_PRODUCTS,
   DIST_BASES,
   distTag,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
+  INDEX_KINDS,
   type IndexRelease,
   isDistTarballUrl,
   loadManifestPkg,
@@ -1106,7 +1113,7 @@ test("ci-v9.6 template: pre-release step after gen; image-check and release-reco
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root);") < build.indexOf('"docker",'), "app tags: checks run before the image build");
 });
 
-test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list, pending until its GitHub repo exists, not a registry product", () => {
+test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list, pending until its GitHub repo exists; only registry product = cli (C174)", () => {
   assert.ok(OPT2_REPOS.includes(cliRepo));
   for (const r of PENDING_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is pending but not an opt2 repo`);
   assert.deepEqual([...PENDING_REPOS], [cliRepo], "only the CLI repo is pending; any other 404 stays an alarm");
@@ -1114,8 +1121,208 @@ test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list, pending
   const listed = /const REPOS = \[([\s\S]*?)\]\.map/.exec(activate)?.[1] ?? "";
   const names = [...listed.matchAll(/"([a-z-]+)"/g)].map((m) => `opt2-tealbrick-${m[1]}`);
   assert.deepEqual(names, OPT2_REPOS, "ops/woodpecker-activate.ts lists the same repos as OPT2_REPOS, in the same order");
-  // the CLI ships package tarballs (kind library, no images), like sdk and packages: no release-index product
-  const products = JSON.parse(readFileSync(new URL("../registry/products.json", import.meta.url), "utf8")) as Record<string, { repo: string }>;
-  assert.ok(!Object.values(products).some((p) => p.repo.endsWith(`/${cliRepo}`)));
+  // the CLI ships package tarballs (kind library, no images); since C174 its ONE release-index product is `cli` (kind cli, file entry)
+  const products = JSON.parse(readFileSync(new URL("../registry/products.json", import.meta.url), "utf8")) as Record<string, { repo: string; kind: string }>;
+  assert.deepEqual(
+    Object.entries(products).filter(([, p]) => p.repo.endsWith(`/${cliRepo}`)),
+    [["cli", { repo: `Martin-Atrin/${cliRepo}`, kind: "cli" }]],
+  );
   assert.ok(!Object.values(products).some((p) => p.repo.endsWith("/opt2-tealbrick-sdk")));
+});
+
+// ---------- C174: `cli` release-index kind (C173 installer + self-update) ----------
+
+const CLI_SHA = "e".repeat(40);
+const cliPkg = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({ name: "@opt2-tealbrick/cli", version: "0.2.0", bin: { tealbrick: "dist/main.js" }, ...over });
+const cliFixture = (pkgJson = cliPkg()) => {
+  const tgz = makeTgz({ "package.json": pkgJson, "dist/main.js": "#!/usr/bin/env node\n" });
+  const sums = assetChecksums("opt2-tealbrick-cli-0.2.0.tgz", tgz);
+  return { tgz, sha256File: sums.files[0]?.body ?? "", integrityFile: sums.files[1]?.body ?? "", sums };
+};
+const cliEntry = (over: Partial<IndexRelease> = {}): IndexRelease => {
+  const f = cliFixture();
+  const r = cliReleaseFromAssets({ version: "0.2.0", commit: CLI_SHA, ...f, publishedAt: "2026-10-14T00:00:00.000Z", id: "rel_01JA0000000000000000000009" });
+  if (typeof r === "string") throw new Error(r);
+  return { ...r, ...over };
+};
+
+test("C174: cli entry shape from a fixture release (dist URL, sha256 + sha512 integrity, nothing else)", () => {
+  const f = cliFixture();
+  const r = cliEntry();
+  assert.deepEqual(INDEX_KINDS, ["app", "bridge", "desktop", "cli"]);
+  assert.equal(r.kind, "cli");
+  assert.equal(r.product, "cli");
+  assert.equal(r.channel, "stable");
+  assert.equal(r.tag, "cli-v0.2.0");
+  assert.equal(r.repo, `Martin-Atrin/${CLI_REPO}`);
+  assert.deepEqual(r.artifact, {
+    url: "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz",
+    sha256: `sha256:${f.sums.sha256}`,
+    integrity: f.sums.integrity,
+  });
+  assert.equal(r.artifact?.url, cliTarballUrl("0.2.0", CLI_DIST_BASE));
+  assert.equal(cliEntryProblem(r), null);
+  assert.equal(r.image ?? r.source ?? r.runtime ?? r.manifestDigest ?? r.minOs ?? r.notarized, null);
+  const dev = cliReleaseFromAssets({
+    version: "0.3.0-dev.1",
+    commit: CLI_SHA,
+    ...cliFixture(cliPkg({ version: "0.3.0-dev.1" })),
+    sha256File: "",
+    integrityFile: "",
+    publishedAt: "t",
+  });
+  assert.match(String(dev), /\.sha256 does not match/, "checksum files are required to agree");
+  // the prod download host is accepted too
+  assert.equal(
+    cliEntryProblem({ ...r, artifact: { ...(r.artifact as { url: string; sha256: string }), url: cliTarballUrl("0.2.0", "https://releases.tealbrick.com") } }),
+    null,
+  );
+});
+
+test("C174: cli entries are refused for a private URL, bad digest formats, missing integrity, extra fields", () => {
+  const r = cliEntry();
+  const art = r.artifact as { url: string; sha256: string; integrity?: string };
+  const bad = (artifact: unknown, re: RegExp, extra: Partial<IndexRelease> = {}) =>
+    assert.match(cliEntryProblem({ ...r, artifact: artifact as IndexRelease["artifact"], ...extra }) ?? "OK", re);
+  bad(
+    { ...art, url: "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz" },
+    /never a private GitHub URL/,
+  );
+  bad({ ...art, url: "https://evil.example/opt2-tealbrick-cli-0.2.0.tgz" }, /dist host/);
+  bad({ ...art, url: cliTarballUrl("0.1.9") }, /must be <dist base>\/opt2-tealbrick-cli-cli-v0\.2\.0\//);
+  bad({ ...art, sha256: art.sha256.slice(7) }, /sha256:<64 hex>/);
+  bad({ ...art, sha256: `sha256:${"A".repeat(64)}` }, /sha256:<64 hex>/);
+  bad({ url: art.url, sha256: art.sha256 }, /integrity .* is required/);
+  bad({ ...art, integrity: `sha256-${"a".repeat(43)}=` }, /sha512-/);
+  bad({ ...art, integrity: "sha512-short==" }, /sha512-/);
+  bad({ ...art, size: 1 }, /unknown field/);
+  bad(null, /needs artifact/);
+  bad(art, /only the artifact/, { image: `ghcr.io/martin-atrin/x@sha256:${"a".repeat(64)}` });
+  bad(art, /desktop fields/, { notarized: true });
+  // mergeIndex enforces the same rules, keeps the entry immutable, and existing kinds are unchanged
+  const i1 = mergeIndex(null, [rel({}), r], [], "t1", [], loadProductBindings());
+  assert.deepEqual(
+    i1.releases.map((x) => `${x.product}:${x.kind}`),
+    ["cli:cli", "knowledge:app"],
+  );
+  assert.equal(mergeIndex(i1, [{ ...r, id: "rel_other" }], [], "t2").releases.length, 2, "idempotent re-add");
+  assert.throws(() => mergeIndex(i1, [{ ...r, artifact: { ...art, integrity: `sha512-${"B".repeat(86)}==` } }], [], "t"), /immutable/);
+  assert.throws(() => mergeIndex(i1, [{ ...r, artifact: { ...art, url: cliTarballUrl("0.2.0", "https://releases.tealbrick.com") } }], [], "t"), /immutable/);
+  assert.throws(() => mergeIndex(null, [{ ...r, artifact: { url: art.url, sha256: art.sha256 } }], [], "t"), /integrity/);
+  assert.throws(() => mergeIndex(null, [{ ...r, kind: "plugin" as IndexRelease["kind"] }], [], "t"), /unknown kind/);
+  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Martin-Atrin/opt2-tealbrick-bridge" }], [], "t", [], loadProductBindings()), /GTP-01/);
+  assert.throws(() => mergeIndex(null, [{ ...r, kind: "desktop" }], [], "t", [], loadProductBindings()), /bound as kind cli/);
+});
+
+test("C174: the signer refuses a cli tarball whose checksums or package.json do not match", () => {
+  const ok = cliFixture();
+  const base = { version: "0.2.0", commit: CLI_SHA, publishedAt: "t" };
+  assert.equal(typeof cliReleaseFromAssets({ ...base, ...ok }), "object");
+  assert.match(String(cliReleaseFromAssets({ ...base, ...ok, sha256File: `${"0".repeat(64)}  opt2-tealbrick-cli-0.2.0.tgz\n` })), /\.sha256 does not match/);
+  assert.match(String(cliReleaseFromAssets({ ...base, ...ok, sha256File: `${ok.sums.sha256}  other.tgz\n` })), /\.sha256 does not match/);
+  assert.match(String(cliReleaseFromAssets({ ...base, ...ok, integrityFile: `sha512-${"A".repeat(86)}==\n` })), /\.integrity does not match/);
+  const wrongVer = cliFixture(cliPkg({ version: "0.1.0" }));
+  assert.match(String(cliReleaseFromAssets({ ...base, ...wrongVer })), /contains @opt2-tealbrick\/cli@0\.1\.0/);
+  const wrongName = cliFixture(cliPkg({ name: "@opt2-tealbrick/relay" }));
+  assert.match(String(cliReleaseFromAssets({ ...base, ...wrongName })), /contains @opt2-tealbrick\/relay/);
+  const noBin = cliFixture(cliPkg({ bin: { other: "x.js" } }));
+  assert.match(String(cliReleaseFromAssets({ ...base, ...noBin })), /no "tealbrick" bin/);
+  assert.match(String(cliReleaseFromAssets({ ...base, ...ok, tgz: Buffer.from("not gzip") })), /does not match|not a readable/);
+  assert.match(String(cliReleaseFromAssets({ ...base, ...ok, commit: "abc" })), /full sha/);
+});
+
+/** A fake GitHub API for the private CLI repo: records every request (URL + whether it carried the token). */
+function fakeCliGitHub(opts: { tagsStatus?: number; release?: "none" | "no-tgz" | "no-sums" | "ok"; fixture?: ReturnType<typeof cliFixture> }) {
+  const f = opts.fixture ?? cliFixture();
+  const calls: { url: string; auth: boolean }[] = [];
+  const assets = [
+    { id: 1, name: "opt2-tealbrick-cli-0.2.0.tgz", body: f.tgz },
+    { id: 2, name: "opt2-tealbrick-cli-0.2.0.tgz.sha256", body: Buffer.from(f.sha256File) },
+    { id: 3, name: "opt2-tealbrick-cli-0.2.0.tgz.integrity", body: Buffer.from(f.integrityFile) },
+    { id: 4, name: "opt2-tealbrick-relay-0.1.0.tgz", body: Buffer.from("x") },
+  ].filter((a) => (opts.release === "no-tgz" ? a.id !== 1 : opts.release === "no-sums" ? a.id !== 3 : true));
+  const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    calls.push({ url, auth: Boolean(headers.authorization) });
+    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const base = "https://api.github.com/repos/Martin-Atrin/opt2-tealbrick-cli";
+    if (url === `${base}/tags?per_page=100`)
+      return opts.tagsStatus && opts.tagsStatus !== 200
+        ? json(opts.tagsStatus, { message: "Not Found" })
+        : json(200, [
+            { name: "cli-v0.2.0", commit: { sha: CLI_SHA } },
+            { name: "relay-v0.1.0", commit: { sha: CLI_SHA } },
+            { name: "harness-claude-v0.2.0", commit: { sha: CLI_SHA } },
+          ]);
+    if (url === `${base}/releases/tags/cli-v0.2.0`)
+      return opts.release === "none" ? json(404, {}) : json(200, { assets: assets.map(({ id, name }) => ({ id, name })) });
+    const m = /\/releases\/assets\/(\d+)$/.exec(url);
+    const a = m ? assets.find((x) => x.id === Number(m[1])) : undefined;
+    if (a && headers.accept === "application/octet-stream") return new Response(new Uint8Array(a.body), { status: 200 });
+    return json(500, { unexpected: url });
+  }) as typeof fetch;
+  return { fetcher, calls };
+}
+
+test("C174: cli source without the read token is PENDING (green, no entry, no network)", async () => {
+  const gh = fakeCliGitHub({});
+  for (const token of [undefined, ""]) {
+    const r = await cliSourceReleases({ token, known: new Set(), fetcher: gh.fetcher });
+    assert.deepEqual(r.add, []);
+    assert.deepEqual(r.rejected, []);
+    assert.match(r.pending ?? "", /TB_PRIVATE_READ_TOKEN/);
+  }
+  assert.equal(gh.calls.length, 0);
+  // token present but the repo is not visible yet (PENDING_REPOS): still pending, not an alarm
+  assert.ok(PENDING_REPOS.includes(CLI_REPO));
+  const hidden = await cliSourceReleases({ token: "t", known: new Set(), fetcher: fakeCliGitHub({ tagsStatus: 404 }).fetcher });
+  assert.match(hidden.pending ?? "", /PENDING_REPOS/);
+  assert.deepEqual(hidden.rejected, []);
+  // a refused token is an alarm (registry-sync fails loudly)
+  const refused = await cliSourceReleases({ token: "t", known: new Set(), fetcher: fakeCliGitHub({ tagsStatus: 401 }).fetcher });
+  assert.match(refused.rejected.join(), /HTTP 401/);
+});
+
+test("C174: cli source with the token builds the entry from a fixture release; pending and broken releases", async () => {
+  const gh = fakeCliGitHub({ release: "ok" });
+  const known = new Set<string>();
+  const r = await cliSourceReleases({ token: "tok", known, fetcher: gh.fetcher, now: () => "2026-10-14T00:00:00.000Z" });
+  assert.equal(r.pending, null);
+  assert.deepEqual(r.rejected, []);
+  assert.equal(r.add.length, 1, "only cli-v* tags; relay/harness tags are not CLI releases");
+  const e = r.add[0] as IndexRelease;
+  assert.equal(cliEntryProblem(e), null);
+  assert.equal(e.commit, CLI_SHA);
+  assert.ok(known.has("cli@0.2.0@stable"));
+  assert.ok(
+    gh.calls.every((c) => c.url.startsWith("https://api.github.com/repos/Martin-Atrin/opt2-tealbrick-cli/") && c.auth),
+    "token only to the CLI repo API",
+  );
+  assert.equal(new Set(gh.calls.filter((c) => c.url.includes("/releases/assets/")).map((c) => c.url)).size, 3, "tgz + .sha256 + .integrity downloaded");
+  // known version: nothing fetched beyond the tag list
+  const again = fakeCliGitHub({ release: "ok" });
+  assert.equal((await cliSourceReleases({ token: "tok", known, fetcher: again.fetcher })).add.length, 0);
+  assert.equal(again.calls.length, 1);
+  // release not created yet, or tarball not uploaded yet: pending (no entry, no rejection)
+  for (const release of ["none", "no-tgz"] as const) {
+    const p = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: fakeCliGitHub({ release }).fetcher });
+    assert.deepEqual([p.add.length, p.rejected.length], [0, 0], release);
+  }
+  // tarball without its checksum assets, or a tampered tarball: rejected
+  const noSums = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: fakeCliGitHub({ release: "no-sums" }).fetcher });
+  assert.match(noSums.rejected.join(), /\.sha256\/\.integrity/);
+  const f = cliFixture();
+  const tampered = { ...f, tgz: makeTgz({ "package.json": cliPkg(), "dist/main.js": "evil" }) };
+  const bad = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: fakeCliGitHub({ release: "ok", fixture: tampered }).fetcher });
+  assert.match(bad.rejected.join(), /\.sha256 does not match/);
+});
+
+test("C174: registry-sync reads the read token from the workflow secret and never with GITHUB_TOKEN", () => {
+  const wf = readFileSync(new URL("../.github/workflows/registry-sync.yml", import.meta.url), "utf8");
+  assert.match(wf, /TB_PRIVATE_READ_TOKEN: \$\{\{ secrets\.TB_PRIVATE_READ_TOKEN \}\}/);
+  const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  assert.match(src, /if \(repo === CLI_REPO\) continue;/, "the generic v* loop does not read the private repo");
+  assert.equal(loadProductBindings().cli?.kind, "cli");
 });

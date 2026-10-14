@@ -3,6 +3,7 @@
 # ops/signer/package-lock.json with --ignore-scripts. Discovers v* tags in the opt2 repos, resolves image digests
 # in ghcr (anonymous pulls: packages must be public), re-derives manifest/skills/runtime from the tag commit,
 # checks image provenance labels, then commits + publishes the signed index with the built-in GITHUB_TOKEN.
+# C174: cli-v* releases of the private CLI repo are read with TB_PRIVATE_READ_TOKEN only (absent = pending, no cli entry).
 name: registry-sync
 on:
   schedule:
@@ -31,5 +32,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          # C164/C174: fine-grained READ-only token (contents + releases of the private repos). Unset = cli entry pending, run stays green.
+          TB_PRIVATE_READ_TOKEN: ${{ secrets.TB_PRIVATE_READ_TOKEN }}
           TB_MANIFEST_MODULE: ops/signer/node_modules/@opt2-tealbrick/manifest/dist/index.js
         run: node ci/tb-ci.ts registry-sync
