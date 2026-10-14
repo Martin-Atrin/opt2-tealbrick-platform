@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T02:06:46.056Z",
+  "generatedAt": "2026-10-14T02:17:09.918Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -2667,6 +2667,28 @@
       "commit": "080ad580ac332fb1f7251618af7d7553157ab75b",
       "tag": "v0.2.5",
       "publishedAt": "2026-10-14T01:55:28.283Z"
+    },
+    {
+      "id": "rel_01M4W35N20SG07GK7Y0CGCZA62",
+      "product": "inbox",
+      "kind": "app",
+      "version": "0.2.6",
+      "channel": "stable",
+      "manifestDigest": "sha256:118c55d3fff2ccfa17407eb5b3edaaff986b4a5d654d0ce53e4146f4e2564da4",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-inbox/ac7c8a4a83fd98d8afa61ed0a15e460389f086be/tealbrick.manifest.json",
+      "skillsDigest": "sha256:7cd856ca752a1a1166be3aded573674c06c41005f94cf889f1f63a4bcd0585ab",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-inbox@sha256:acc6cd638099002878b22ef79826cd6ded7ce723be398556287957a96c9538dd",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-inbox",
+      "commit": "ac7c8a4a83fd98d8afa61ed0a15e460389f086be",
+      "tag": "v0.2.6",
+      "publishedAt": "2026-10-14T02:16:57.664Z"
     },
     {
       "id": "rel_01M4QYRJN5YCRR27GSZYTWPGDD",
