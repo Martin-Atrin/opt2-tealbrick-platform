@@ -1,0 +1,15 @@
+{
+  "bridge": { "repo": "Martin-Atrin/opt2-tealbrick-bridge", "kind": "bridge" },
+  "connect": { "repo": "Martin-Atrin/opt2-tealbrick-connect", "kind": "app" },
+  "evolution": { "repo": "Martin-Atrin/opt2-tealbrick-evolution", "kind": "app" },
+  "fleet": { "repo": "Martin-Atrin/opt2-tealbrick-fleet", "kind": "app" },
+  "inbox": { "repo": "Martin-Atrin/opt2-tealbrick-inbox", "kind": "app" },
+  "kanban": { "repo": "Martin-Atrin/opt2-tealbrick-kanban", "kind": "app" },
+  "knowledge": { "repo": "Martin-Atrin/opt2-tealbrick-knowledge", "kind": "app" },
+  "rules": { "repo": "Martin-Atrin/opt2-tealbrick-rules", "kind": "app" },
+  "sample-caller": { "repo": "Martin-Atrin/opt2-tealbrick-samples", "kind": "app" },
+  "sample-gate": { "repo": "Martin-Atrin/opt2-tealbrick-samples", "kind": "app" },
+  "sample-mismatch": { "repo": "Martin-Atrin/opt2-tealbrick-samples", "kind": "app" },
+  "sample-pay": { "repo": "Martin-Atrin/opt2-tealbrick-samples", "kind": "app" },
+  "tbd": { "repo": "Martin-Atrin/opt2-tealbrick-tbd", "kind": "desktop" }
+}

@@ -21,6 +21,7 @@ import {
   expectedGenFiles,
   type IndexRelease,
   loadManifestPkg,
+  loadProductBindings,
   lockfileTarballs,
   lockPinProblems,
   mergeIndex,
@@ -35,6 +36,7 @@ import {
   packageReleaseCommands,
   packEntryTargets,
   parsePackageTag,
+  productBindingProblem,
   releaseChannel,
   releaseUrl,
   renderImagesScript,
@@ -48,6 +50,7 @@ import {
   validateConfig,
   validateHarnesses,
   validateOffers,
+  validateProducts,
   verifyImageProvenance,
   versionFromTag,
   workspaceGlobs,
@@ -292,6 +295,49 @@ test("the committed registry/harnesses.json is valid and has a claude-code row (
   assert.ok(cc, "claude-code row");
   assert.equal(cc.authorise, "device_approval");
   assert.ok(cc.instructions.some((st) => st.copy?.value.includes("--harness claude-code")));
+  // F77/F78 (CLI 0.1.20): connect writes the project scope .mcp.json with absolute node + tealbrick paths
+  const wire = cc.instructions.find((st) => st.copy?.value.startsWith("tealbrick connect claude-code"));
+  assert.ok(
+    wire && /project scope/.test(wire.detail) && /\.mcp\.json/.test(wire.detail) && /full paths/.test(wire.detail),
+    "row says project scope + absolute paths",
+  );
+});
+
+test("GTP-01: a product is signed only from its bound repo and kind (fires on a foreign repo, quiet on its own)", () => {
+  const b = validateProducts({
+    bridge: { repo: "Martin-Atrin/opt2-tealbrick-bridge", kind: "bridge" },
+    knowledge: { repo: `Martin-Atrin/${repo}`, kind: "app" },
+  });
+  // quiet on good
+  assert.equal(productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Martin-Atrin/opt2-tealbrick-bridge" }), null);
+  assert.equal(mergeIndex(null, [rel({})], [], "t", [], b).releases.length, 1, "knowledge from its own repo is signed");
+  // fire on bad: a samples tag declaring product "bridge" (the review's attack), a kind change, an unknown product
+  assert.match(
+    productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Martin-Atrin/opt2-tealbrick-samples" }) ?? "",
+    /bound to Martin-Atrin\/opt2-tealbrick-bridge/,
+  );
+  assert.match(productBindingProblem(b, { product: "knowledge", kind: "bridge", repo: `Martin-Atrin/${repo}` }) ?? "", /bound as kind app/);
+  assert.match(productBindingProblem(b, { product: "newapp", kind: "app", repo: `Martin-Atrin/${repo}` }) ?? "", /not bound/);
+  assert.match(productBindingProblem(b, { product: "constructor", kind: "app", repo: `Martin-Atrin/${repo}` }) ?? "", /not bound/, "no prototype keys");
+  const evil = rel({ product: "bridge", kind: "bridge", version: "99.0.0", manifestDigest: null, runtime: brt, repo: "Martin-Atrin/opt2-tealbrick-samples" });
+  assert.throws(() => mergeIndex(null, [evil], [], "t", [], b), /GTP-01/);
+  // without the map, the index still refuses a repo change for a product that already has releases
+  const i1 = mergeIndex(
+    null,
+    [rel({ product: "bridge", kind: "bridge", manifestDigest: null, runtime: brt, repo: "Martin-Atrin/opt2-tealbrick-bridge" })],
+    [],
+    "t",
+  );
+  assert.throws(() => mergeIndex(i1, [evil], [], "t2"), /earlier releases of bridge come from Martin-Atrin\/opt2-tealbrick-bridge/);
+  assert.throws(() => validateProducts({ bridge: { repo: "evil/opt2-tealbrick-bridge", kind: "bridge" } }), /repo must be/);
+  assert.throws(() => validateProducts({ bridge: { repo: "Martin-Atrin/opt2-tealbrick-bridge", kind: "lib" } }), /kind must be/);
+});
+
+test("GTP-01: the committed registry/products.json binds every product of the committed index to the repo it came from", () => {
+  const b = loadProductBindings();
+  const index = JSON.parse(readFileSync(new URL("../registry/index.json", import.meta.url), "utf8")) as { releases: IndexRelease[] };
+  for (const r of index.releases) assert.equal(productBindingProblem(b, r), null, `${r.product}@${r.version}`);
+  assert.equal(b.bridge?.repo, "Martin-Atrin/opt2-tealbrick-bridge");
 });
 
 test("C42: VOLUME instruction detection", () => {

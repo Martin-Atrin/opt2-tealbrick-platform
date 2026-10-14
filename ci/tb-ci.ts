@@ -36,6 +36,8 @@ export const INDEX_PATH = "registry/index.json";
 export const ENVELOPE_PATH = "registry/index.jws";
 export const OFFERS_PATH = "registry/offers.json";
 export const HARNESSES_PATH = "registry/harnesses.json";
+/** GTP-01: the reviewed product → {repo, kind} binding the signer enforces (change by platform PR only). */
+export const PRODUCTS_PATH = "registry/products.json";
 export const REGISTRY_RELEASE_TAG = "registry";
 export const INDEX_SCHEMA = "opt2.release-index/v2";
 export const INDEX_TYP = "tb-release-index+jws";
@@ -598,9 +600,50 @@ export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEn
   return out;
 }
 
+export interface ProductBinding {
+  repo: string; // "Martin-Atrin/opt2-tealbrick-<name>"
+  kind: IndexRelease["kind"];
+}
+export type ProductBindings = Record<string, ProductBinding>;
+
+/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop" } }. */
+export function validateProducts(raw: unknown): ProductBindings {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("products.json must be an object { product: { repo, kind } }");
+  const out: ProductBindings = {};
+  for (const [product, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(product)) throw new Error(`products.json: bad product id ${product}`);
+    const b = v as Record<string, unknown>;
+    if (!b || typeof b !== "object" || Object.keys(b).sort().join(",") !== "kind,repo")
+      throw new Error(`products.json ${product}: fields must be exactly repo, kind`);
+    if (typeof b.repo !== "string" || !new RegExp(`^${OWNER}/opt2-tealbrick-[a-z0-9-]+$`).test(b.repo))
+      throw new Error(`products.json ${product}: repo must be ${OWNER}/opt2-tealbrick-<name>`);
+    if (!["app", "bridge", "desktop"].includes(b.kind as string)) throw new Error(`products.json ${product}: kind must be app, bridge or desktop`);
+    out[product] = { repo: b.repo, kind: b.kind as ProductBinding["kind"] };
+  }
+  return out;
+}
+
+/** GTP-01: a release may come only from the repo (and as the kind) its product is bound to; unknown products are refused. */
+export function productBindingProblem(bindings: ProductBindings, r: { product: string; kind: string; repo: string | null }): string | null {
+  const b = Object.hasOwn(bindings, r.product) ? bindings[r.product] : undefined;
+  if (!b) return `${r.product} is not bound to a repo in ${PRODUCTS_PATH} (a new product is added there by a platform PR)`;
+  if (r.repo !== b.repo) return `${r.product} is bound to ${b.repo}; a release from ${r.repo ?? "no repo"} is refused (GTP-01)`;
+  if (r.kind !== b.kind) return `${r.product} is bound as kind ${b.kind}; a ${r.kind} release is refused (GTP-01)`;
+  return null;
+}
+
 /** Merge new releases into the index. Releases are immutable: (product, version, channel) never changes content.
- *  A dev source build (C29) and the later stable image of the same version are two releases. */
-export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offers: Offer[], now: string, harnesses: Harness[] = []): ReleaseIndex {
+ *  A dev source build (C29) and the later stable image of the same version are two releases.
+ *  GTP-01: with `bindings`, every added release must match its product's repo/kind binding; always, a product never
+ *  changes repo (an added release from another repo than the product's earlier releases is refused). */
+export function mergeIndex(
+  prev: ReleaseIndex | null,
+  add: IndexRelease[],
+  offers: Offer[],
+  now: string,
+  harnesses: Harness[] = [],
+  bindings?: ProductBindings,
+): ReleaseIndex {
   const releases: IndexRelease[] = (prev?.releases ?? []).map((r) => ({ ...r, runtime: r.runtime ?? null, services: r.services ?? null }));
   for (const r of add) {
     if (r.channel === "stable" && isDevOnlyProduct(r.product))
@@ -610,6 +653,13 @@ export function mergeIndex(prev: ReleaseIndex | null, add: IndexRelease[], offer
     if (r.kind !== "desktop" && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
     if ((r.kind === "bridge") !== (r.runtime !== null && r.runtime !== undefined))
       throw new Error(`${r.product}@${r.version}: runtime is required for kind bridge and only allowed there`);
+    if (bindings) {
+      const problem = productBindingProblem(bindings, r);
+      if (problem) throw new Error(`${r.product}@${r.version}: ${problem}`);
+    }
+    const earlier = releases.find((x) => x.product === r.product && x.repo !== r.repo);
+    if (earlier)
+      throw new Error(`${r.product}@${r.version}: earlier releases of ${r.product} come from ${earlier.repo}; a release from ${r.repo} is refused (GTP-01)`);
     const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
     if (old) {
       if (
@@ -1440,6 +1490,11 @@ async function ghFile(path: string, ref: string): Promise<string | null> {
 }
 
 /** Read index + offers at main, merge, re-sign with the manifest package, commit to main (fast-forward), publish release assets. */
+/** GTP-01: the binding map from the signer's own checkout (the platform repo; same file as on main). */
+export function loadProductBindings(): ProductBindings {
+  return validateProducts(JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", PRODUCTS_PATH), "utf8")));
+}
+
 async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise<void> {
   // Unsigned mode exists only until the spec defines the release-index typ (REQUESTS "platform: release index typ").
   const signed = process.env.TB_REGISTRY_UNSIGNED !== "1";
@@ -1461,7 +1516,7 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     const harnessesText = await ghFile(HARNESSES_PATH, headSha);
     const harnesses = validateHarnesses(harnessesText ? JSON.parse(harnessesText) : []);
     const devOnlyNotes = normalizeDevOnly(prev?.releases ?? []).notes; // C113: what this publish changes in existing records
-    const index = mergeIndex(prev, add, offers, new Date().toISOString(), harnesses);
+    const index = mergeIndex(prev, add, offers, new Date().toISOString(), harnesses, loadProductBindings());
     const body = serializeIndex(index);
     let jws: string | null = null;
     if (key && m) {
@@ -1767,6 +1822,7 @@ async function cmdRegistrySync(): Promise<void> {
   const known = new Set((index?.releases ?? []).map((r) => `${r.product}@${r.version}@${r.channel}`));
   const add: IndexRelease[] = [];
   const rejected: string[] = [];
+  const bindings = loadProductBindings();
   for (const repo of OPT2_REPOS) {
     const tags = await gh("GET", `/repos/${OWNER}/${repo}/tags?per_page=50`);
     for (const t of (tags.json ?? []) as { name: string; commit: { sha: string } }[]) {
@@ -1782,6 +1838,12 @@ async function cmdRegistrySync(): Promise<void> {
       if (!doc) continue; // no images for this tag (yet): pending, not an error
       for (const c of doc.candidates) {
         if (known.has(`${c.product}@${version}@${releaseChannel(c.product, version)}`)) continue;
+        // GTP-01: a tag in one repo can never sign another repo's product (e.g. samples declaring product "bridge").
+        const bound = productBindingProblem(bindings, { product: c.product, kind: c.kind, repo: doc.repo });
+        if (bound) {
+          rejected.push(`${repo} ${doc.tag} ${c.product}: ${bound}`);
+          continue;
+        }
         const r = await verifyCandidate(m, doc, c);
         if (typeof r === "string") rejected.push(`${repo} ${doc.tag} ${c.product}: ${r}`);
         else {
