@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T02:19:24.419Z",
+  "generatedAt": "2026-10-14T02:24:29.847Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -3745,6 +3745,28 @@
       "commit": "1f0568eae48bd5c0cd74595ef93a9e2e053c60da",
       "tag": "v0.2.8",
       "publishedAt": "2026-10-14T01:53:05.845Z"
+    },
+    {
+      "id": "rel_01M4W3K2GSFPQKG89AZAZZ3JHK",
+      "product": "rules",
+      "kind": "app",
+      "version": "0.2.9",
+      "channel": "stable",
+      "manifestDigest": "sha256:888e49afb94b778c0979f4151d1e809ff9b92d92d6526a4df5ce3ff8d418ed5c",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-rules/79856b312706a1a5a16504457c91e68d77658803/tealbrick.manifest.json",
+      "skillsDigest": "sha256:8882eadf58c763b1f81c3955f53dc6aec34f21f10d6a535e822ac42f64c9d9f1",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-rules@sha256:3fc176b850c86c7daa97a968ef30655d923002bc895409be75de3c57a4c19739",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-rules",
+      "commit": "79856b312706a1a5a16504457c91e68d77658803",
+      "tag": "v0.2.9",
+      "publishedAt": "2026-10-14T02:24:17.433Z"
     },
     {
       "id": "rel_01M4QA4P7WW7AT1WSE3JBZGHAW",
