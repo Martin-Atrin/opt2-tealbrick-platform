@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v9.5)
+# opt2 CI standard (template ci-v9.6)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -22,6 +22,7 @@ every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci
 | conformance | root script `conformance` (required for kind miniapp, bridge) | non-zero exit |
 | build | root script `build` if present; writes `.tb-ci/images.sh` | non-zero exit |
 | gen | (BSA-03) if a `gen/` is committed: `tb-gen check` first (stale = fail); then the repo's `gen` script (must be `tb-gen all`) and a check that gen/openapi, gen/kit/<product>-kit, gen/docs, gen/railway exist; then `tb-gen check` | kind miniapp without a `gen` script, a stale committed gen/, a gen script that does not produce every kind, drift |
+| pre-release (ci-v9.6) | runs the repo's `preReleaseChecks` (see "Pre-release gate" below); a green no-op without them | a check exits non-zero or its file is missing |
 | image-check | kaniko builds every declared image, no push (PR, push, manual) | build fails |
 | postgres (opt-in, ci-v9.1) | step after `setup` (ci-v9.3: a normal, non-detached step beside the unit step). Starts an ephemeral Postgres 17 only when `tealbrick-ci.json` has `"postgres": true`; otherwise it exits 0 at once (green). When on, the `unit` step waits for it (max 90 s) and gets `TB_TEST_DATABASE_URL`; tests that want a real database skip when it is unset. ci-v9.2: the step stops itself when the unit step ends (see below). ci-v9.3: and it is a normal step, so it is really green | opted in and not reachable within 90 s |
 | release-record | tag `v*`: hash-checked runner validates the manifest/services/runtime and prints the release. No token, no signing key; the manifest package is loaded only if it matches `TB_MANIFEST_INTEGRITY` (C62). ci-v9.2: pinned to `@opt2-tealbrick/manifest` 0.1.8 (spec 0.1.13: wildcard companions, M-CP-3; 0.1.5 refused `product:"*"`). ci-v9.3: `@opt2-tealbrick/spec` 0.1.13, which the manifest package pulls from a GitHub URL without integrity, is pinned too (`TB_SPEC_PKG` + `TB_SPEC_INTEGRITY`, sha512) | invalid manifest, version mismatch, any token in the environment |
@@ -88,12 +89,23 @@ Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "
 ] }
 ```
 
+## Dist host for the assets of private repos (ci-v9.6, C154/C157)
+A repo that goes private cannot serve its release tarballs from github.com to anonymous consumers. Such a repo sets `"distBaseUrl"` in `tealbrick-ci.json` (or the env `TB_DIST_BASE_URL`, which wins). Only the hosts in `DIST_BASES` (`ci/tb-ci.ts`) are accepted: the assets-only public repo `https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download` now, `https://releases.tealbrick.com` for prod. Add a host by platform PR only.
+- Layout on a dist host: `<base>/<repo>-<release tag>/<file>`, one path segment. Example: `https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz` (`.sha256` and `.integrity` sit next to it).
+- Release time: `package-pack` rewrites `workspace:` deps to dist URLs instead of the repo's github.com URLs, and checks the dist file exists (so publish the dependency to the dist host before tagging a package that needs it). Without `distBaseUrl` nothing changes.
+- Consumers: `setup` accepts a dist URL for `@opt2-tealbrick/*` dependencies (next to the github.com release URL). `pin-tarballs` and the lockfile integrity check cover dist tarballs; the lockfile `integrity` (sha512) is what pins the bytes, whichever host serves them.
+- Registry index: `registry-add-desktop --url <dist file> --repo opt2-tealbrick-<name> --sha256 …` (the dist URL is `<base>/<repo>-<tag>/<file>`); the index keeps `artifact.sha256`, which the command downloads and checks. App images stay in public GHCR and need no dist host.
+- NOT done by the runner: copying release assets from the (private) source release to the dist host. The release Action's built-in `GITHUB_TOKEN` cannot write to another repo, so the mirror needs its own mechanism (open question for the Coordinator).
+
+## Pre-release gate (ci-v9.6)
+`"preReleaseChecks": ["scripts/release-gate.ts"]` in `tealbrick-ci.json` lists repo-relative TypeScript files. The `pre-release` step runs each as `node <file>` from the repo root, in order, on EVERY pipeline (after `gen`), so a green pipeline means the gate passed before anyone tags (L10). The release Action's `gh-build` runs the same list again on the tag: for a package tag after install and build and before `npm pack`, for an `v*` tag after a frozen install and before images are built. The first non-zero exit stops the run; `setup` fails when a listed file does not exist. Checks get `TB_PRE_RELEASE=1`, `TB_RELEASE_TAG` (the tag, empty outside tag runs) and `TB_DIST_BASE_URL` (when a dist base is in force); no tokens are present (the runner refuses `GITHUB_TOKEN`/`GH_TOKEN`/`GHCR_TOKEN`). Use it for repo-specific release rules (for example `opt2-tealbrick-cli`: no dependency on the private bridge, server deny-list) instead of editing the frozen template.
+
 ## Package releases (multi-package repos: specs, sdk, bridge, packages)
 Tag `<dir>-v<semver>` where `<dir>` is the folder name under `packages/` and `<semver>` equals that package.json `version`
 (e.g. `manifest-v0.1.0`). The release workflow installs, runs the build, rewrites in-repo `workspace:` deps to their release URLs
 (they must be released first), runs `npm pack`, checks the tarball with the pack guard, and attaches `<name>-<version>.tgz` + `.sha256` to the GitHub release.
 Local check before tagging (same path as the Action, no token): `CI_WORKSPACE=$PWD CI_REPO_NAME=<repo> CI_COMMIT_TAG=<dir>-v<ver> CI_COMMIT_SHA=$(git rev-parse HEAD) node <platform>/ci/tb-ci.ts gh-build`, then inspect `.tb-ci/out/assets/*.tgz`.
-Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`).
+Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`). With `distBaseUrl` the dependency URLs written into the packed tarball point at the dist host instead (see above).
 
 ## App releases
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
@@ -113,6 +125,8 @@ Never run a global `docker/podman system prune` on the CI host (shared daemon).
 1. Edit `ci/tb-ci.ts` and/or `ci/woodpecker/ci.yaml`. For a new version, bump `TB_CI_REF` in the template.
 2. `pnpm stamp` (writes the runner sha256 into the template and `.woodpecker/ci.yaml`).
 3. Commit, tag `ci-vN`, push the tag. Re-run `adopt` in each repo (copies the new template).
+
+ci-v9.6 (C154/C157/C158): two opt-in fields in `tealbrick-ci.json`, `distBaseUrl` and `preReleaseChecks`, a new `pre-release` template step, `opt2-tealbrick-cli` in `OPT2_REPOS` (marked pending in `PENDING_REPOS` until its GitHub repo exists: the template audit and registry-sync skip a 404 for it only), and the CLI repo in `ops/woodpecker-activate.ts` (not run). Default behaviour is unchanged: a repo without the new fields gets a green no-op `pre-release` step and the same github.com URLs. **Migration:** the two fields exist only in the ci-v9.6 runner; an older runner refuses them as unknown fields. A repo that wants them re-runs `node ci/tb-ci.ts adopt ../opt2-tealbrick-<name> --kind <kind>` (template + release workflow) and commits, then adds the fields. Repos that do not need them can stay on ci-v9.5 (`MIN_TEMPLATE` stays `ci-v8`). The repo-specific $schema ref in `tealbrick-ci.json` may move to `ci-v9.6` to get the new fields in the editor.
 
 ci-v9.5 (F27): the release Action publishes `<tarball>.integrity` next to each `<tarball>.sha256`: one line, the npm/pnpm lockfile `integrity` value (`sha512-…`) of the same bytes, so a consumer pins it without computing it (`assetChecksums` in `ci/tb-ci.ts`). Repos get it when they re-run `adopt` (template + release workflow). Nothing else changed; `MIN_TEMPLATE` stays `ci-v8`.
 

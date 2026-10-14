@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   addPnpmIntegrity,
+  artifactSource,
   assetChecksums,
   belowMinimum,
   channelForVersion,
@@ -16,18 +17,25 @@ import {
   checkPackedTarball,
   checkServiceImages,
   DEV_ONLY_PRODUCTS,
+  DIST_BASES,
+  distTag,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
   type IndexRelease,
+  isDistTarballUrl,
   loadManifestPkg,
   loadProductBindings,
   lockfileTarballs,
   lockPinProblems,
   mergeIndex,
   missingPackTargets,
+  missingPreReleaseChecks,
   newId,
   normalizeDevOnly,
+  normalizeDistBase,
+  OPT2_REPOS,
+  PENDING_REPOS,
   PG_DONE_MARKER,
   PG_MARKER,
   PG_TEST_URL,
@@ -36,10 +44,13 @@ import {
   packageReleaseCommands,
   packEntryTargets,
   parsePackageTag,
+  parsePreReleaseChecks,
+  preReleaseEnv,
   productBindingProblem,
   releaseChannel,
   releaseUrl,
   renderImagesScript,
+  resolveDistBase,
   sha512Integrity,
   skillsArchive,
   tarballName,
@@ -685,7 +696,7 @@ test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keep
   const g = templateGraph(tpl);
   assert.deepEqual(
     [...g.keys()],
-    ["secret-scan", "setup", "install", "typecheck", "lint", "postgres", "unit", "conformance", "build", "gen", "image-check", "release-record"],
+    ["secret-scan", "setup", "install", "typecheck", "lint", "postgres", "unit", "conformance", "build", "gen", "pre-release", "image-check", "release-record"],
   );
   for (const [name, s] of g) {
     assert.equal(s.detach, false, `${name}: no detached steps (they end red on this Woodpecker)`);
@@ -707,7 +718,7 @@ test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keep
   const level = (n: string): number => 1 + Math.max(0, ...(g.get(n)?.deps ?? []).map(level));
   assert.equal(level("postgres"), level("unit"), "postgres ends after unit, so it must share unit's stage (an earlier stage deadlocks)");
   // the node chain is the old sequential order
-  const chain = ["secret-scan", "setup", "install", "typecheck", "lint", "unit", "conformance", "build", "gen"];
+  const chain = ["secret-scan", "setup", "install", "typecheck", "lint", "unit", "conformance", "build", "gen", "pre-release"];
   for (let i = 1; i < chain.length; i++) assert.deepEqual(g.get(chain[i] as string)?.deps, [chain[i - 1]], `${chain[i]} follows ${chain[i - 1]}`);
   assert.deepEqual(g.get("secret-scan")?.deps, []);
   // postgres runs BESIDE unit (Woodpecker runs a graph in stages: a stage ends when all its steps end, so postgres, which
@@ -715,9 +726,9 @@ test("ci-v9.3 template: every step has depends_on, the graph is acyclic and keep
   for (const [n, s2] of g) assert.ok(!s2.deps.includes("postgres"), `${n} must not wait for the postgres step by name`);
   assert.deepEqual(g.get("postgres")?.deps, g.get("unit")?.deps, "same stage as unit");
   assert.deepEqual(g.get("postgres")?.deps, ["lint"]);
-  // the last two steps end the chain on tags / other events
-  assert.deepEqual(g.get("image-check")?.deps, ["gen"]);
-  assert.deepEqual(g.get("release-record")?.deps, ["gen"]);
+  // the last two steps end the chain on tags / other events (ci-v9.6: both wait for the pre-release gate)
+  assert.deepEqual(g.get("image-check")?.deps, ["pre-release"]);
+  assert.deepEqual(g.get("release-record")?.deps, ["pre-release"]);
 });
 
 test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile check fails closed", () => {
@@ -906,4 +917,205 @@ test("ci-v9.5 (F27): each release tarball gets a .sha256 and an npm-style .integ
   ]);
   // the value npm writes into package-lock.json for the same bytes
   assert.match(c.files[1]!.body.trim(), /^sha512-[A-Za-z0-9+/]{86}==$/);
+});
+
+// ---------- ci-v9.6 (C154/C157/C158): dist host + pre-release gate ----------
+
+const distBase = DIST_BASES[0] as string;
+const cliRepo = "opt2-tealbrick-cli";
+
+test("ci-v9.6 distBaseUrl: absent = unchanged GitHub default; only platform dist hosts are accepted", () => {
+  assert.equal(validateConfig({ kind: "library" }, cliRepo).distBaseUrl, null);
+  assert.equal(resolveDistBase(validateConfig({ kind: "library" }, cliRepo), {}), null);
+  assert.equal(validateConfig({ kind: "library", distBaseUrl: `${distBase}/` }, cliRepo).distBaseUrl, distBase, "trailing slash dropped");
+  assert.equal(validateConfig({ kind: "library", distBaseUrl: "https://releases.tealbrick.com" }, cliRepo).distBaseUrl, "https://releases.tealbrick.com");
+  for (const bad of [
+    "https://evil.example",
+    "http://releases.tealbrick.com",
+    "https://releases.tealbrick.com.evil.example",
+    "https://github.com/Other/opt2-tealbrick-dist/releases/download",
+    "",
+    5,
+  ])
+    assert.throws(() => validateConfig({ kind: "library", distBaseUrl: bad }, cliRepo), /distBaseUrl/, String(bad));
+  // env wins over the file; an env value is held to the same list
+  const cfg = validateConfig({ kind: "library", distBaseUrl: distBase }, cliRepo);
+  assert.equal(resolveDistBase(cfg, { TB_DIST_BASE_URL: "https://releases.tealbrick.com" }), "https://releases.tealbrick.com");
+  assert.equal(resolveDistBase(cfg, { TB_DIST_BASE_URL: "" }), distBase);
+  assert.throws(() => resolveDistBase(cfg, { TB_DIST_BASE_URL: "https://evil.example" }), /TB_DIST_BASE_URL/);
+  assert.throws(() => normalizeDistBase(undefined, "x"), /must be a string/);
+});
+
+test("ci-v9.6 releaseUrl: default unchanged, dist base gives <base>/<repo>-<tag>/<file>", () => {
+  const github = "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz";
+  assert.equal(releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0"), github);
+  assert.equal(releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", null), github);
+  const dist = releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", distBase);
+  assert.equal(dist, `${distBase}/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz`);
+  assert.equal(distTag(cliRepo, "relay-v0.1.0"), "opt2-tealbrick-cli-relay-v0.1.0");
+  assert.equal(
+    releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", "https://releases.tealbrick.com/"),
+    "https://releases.tealbrick.com/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+  );
+  assert.throws(() => releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", "https://evil.example"), /distBase/);
+  assert.equal(isDistTarballUrl(dist), true);
+  assert.equal(isDistTarballUrl(github), false);
+});
+
+test("ci-v9.6 dependency rules accept a dist URL, still refuse look-alikes (L34 both ways)", () => {
+  const dist = releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", distBase);
+  const rel = releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", "https://releases.tealbrick.com");
+  const [errs, urls] = checkDependencies({ dependencies: { "@opt2-tealbrick/relay": dist }, devDependencies: { "@opt2-tealbrick/x": rel } }, "pkg", new Set());
+  assert.deepEqual(errs, []);
+  assert.deepEqual(urls, [dist, rel]);
+  const bad = [
+    "https://releases.tealbrick.com.evil.example/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+    "https://releases.tealbrick.com/evil/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+    "https://releases.tealbrick.com/opt2-tealbrick-cli-relay-v0.1.0/../x/opt2-tealbrick-relay-0.1.0.tgz",
+    "https://releases.tealbrick.com/cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+    "https://releases.tealbrick.com/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.zip",
+    "https://github.com/Other/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+  ];
+  for (const url of bad) assert.equal(checkDependencies({ dependencies: { "@opt2-tealbrick/relay": url } }, "p", new Set())[0].length, 1, url);
+});
+
+test("ci-v9.6 lockfile integrity covers dist tarballs (pnpm pin and npm read)", () => {
+  const url = releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", distBase);
+  const lock = `packages:\n  '@opt2-tealbrick/relay@${url}':\n    resolution: {tarball: ${url}}\n    version: 0.1.0\n  other@1.0.0:\n    resolution: {tarball: https://example.com/a.tgz}\n`;
+  assert.deepEqual(lockfileTarballs(lock, "pnpm"), [{ url, integrity: null }]);
+  const { text, changed } = addPnpmIntegrity(lock, () => "sha512-ABC=");
+  assert.equal(changed, 1, "the dist tarball is pinned, the foreign host is left alone");
+  assert.match(text, /resolution: \{tarball: https:\/\/example\.com\/a\.tgz\}/);
+  assert.deepEqual(lockfileTarballs(text, "pnpm"), [{ url, integrity: "sha512-ABC=" }]);
+  const npm = JSON.stringify({
+    packages: { "node_modules/x": { resolved: url, integrity: "sha512-q" }, "node_modules/y": { resolved: "https://example.com/a.tgz" } },
+  });
+  assert.deepEqual(lockfileTarballs(npm, "npm"), [{ url, integrity: "sha512-q" }]);
+});
+
+test("ci-v9.6 registry-add-desktop: GitHub asset URL as before, or a dist file with --repo", () => {
+  assert.deepEqual(artifactSource("https://github.com/Martin-Atrin/opt2-tealbrick-tbd/releases/download/v1.2.3/TBD-1.2.3.dmg"), {
+    repo: "opt2-tealbrick-tbd",
+    tag: "v1.2.3",
+  });
+  assert.deepEqual(artifactSource(`${distBase}/opt2-tealbrick-tbd-v1.2.3/TBD-1.2.3.dmg`, "opt2-tealbrick-tbd"), { repo: "opt2-tealbrick-tbd", tag: "v1.2.3" });
+  assert.throws(() => artifactSource(`${distBase}/opt2-tealbrick-tbd-v1.2.3/TBD-1.2.3.dmg`), /--repo/);
+  assert.throws(() => artifactSource(`${distBase}/opt2-tealbrick-tbd-v1.2.3/TBD-1.2.3.dmg`, "opt2-tealbrick-cli"), /must look like/);
+  assert.throws(() => artifactSource(`${distBase}/opt2-tealbrick-tbd-v1.2.3/a/b.dmg`, "opt2-tealbrick-tbd"), /must look like/);
+  assert.throws(() => artifactSource("https://evil.example/TBD.dmg", "opt2-tealbrick-tbd"), /GitHub release asset URL/);
+  assert.throws(() => artifactSource("https://github.com/Other/opt2-tealbrick-tbd/releases/download/v1/x.dmg"), /GitHub release asset URL/);
+});
+
+test("ci-v9.6 preReleaseChecks: TypeScript, repo-relative, unique", () => {
+  assert.deepEqual(validateConfig({ kind: "library" }, cliRepo).preReleaseChecks, []);
+  assert.deepEqual(validateConfig({ kind: "library", preReleaseChecks: ["scripts/release-gate.ts", "scripts/b.ts"] }, cliRepo).preReleaseChecks, [
+    "scripts/release-gate.ts",
+    "scripts/b.ts",
+  ]);
+  for (const bad of [
+    ["scripts/gate.js"],
+    ["scripts/gate.mjs"],
+    ["../gate.ts"],
+    ["/etc/gate.ts"],
+    ["a.ts", "a.ts"],
+    [5],
+    "scripts/gate.ts",
+    ["a b.ts"],
+    ["x; rm -rf y.ts"],
+  ])
+    assert.throws(() => parsePreReleaseChecks(bad), /preReleaseChecks/, JSON.stringify(bad));
+  assert.throws(() => parsePreReleaseChecks(Array.from({ length: 21 }, (_v, i) => `s/${i}.ts`)), /at most 20/);
+  assert.deepEqual(
+    missingPreReleaseChecks(["a.ts", "b.ts"], (r) => r === "a.ts"),
+    ["b.ts"],
+  );
+  const env = preReleaseEnv(validateConfig({ kind: "library", distBaseUrl: distBase }, cliRepo), { CI_COMMIT_TAG: "relay-v0.1.0", PATH: "/bin" });
+  assert.equal(env.TB_PRE_RELEASE, "1");
+  assert.equal(env.TB_RELEASE_TAG, "relay-v0.1.0");
+  assert.equal(env.TB_DIST_BASE_URL, distBase);
+  const plain = preReleaseEnv(validateConfig({ kind: "library" }, cliRepo), { PATH: "/bin" });
+  assert.equal(plain.TB_RELEASE_TAG, "");
+  assert.equal(plain.TB_DIST_BASE_URL, undefined);
+});
+
+/** Runs `tb-ci pre-release` in a throw-away repo directory (no network: the command only reads the config and runs the scripts). */
+function runPreRelease(files: Record<string, string>, config: Record<string, unknown>, extraEnv: Record<string, string> = {}): { code: number; out: string } {
+  const dir = mkdtempSync(join(tmpdir(), "tb-prerelease-"));
+  try {
+    writeFileSync(join(dir, "tealbrick-ci.json"), JSON.stringify(config));
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(join(dir, rel, ".."), { recursive: true });
+      writeFileSync(join(dir, rel), body);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CI_WORKSPACE: dir, CI_REPO_NAME: cliRepo, GITHUB_TOKEN: "", GH_TOKEN: "", GHCR_TOKEN: "", ...extraEnv };
+    for (const k of ["GITHUB_TOKEN", "GH_TOKEN", "GHCR_TOKEN"]) if (!extraEnv[k]) delete env[k];
+    try {
+      const out = execFileSync(process.execPath, [new URL("./tb-ci.ts", import.meta.url).pathname, "pre-release"], { env, encoding: "utf8", stdio: "pipe" });
+      return { code: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { code: err.status ?? 1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("ci-v9.6 pre-release step: no-op without checks, passes a good gate, fails a bad or missing one, refuses tokens (L34)", () => {
+  const none = runPreRelease({}, { kind: "library" });
+  assert.equal(none.code, 0, none.out);
+  assert.match(none.out, /nothing to run/);
+  const good = runPreRelease(
+    {
+      "scripts/ok.ts": `if (process.env.TB_PRE_RELEASE !== "1" || process.env.TB_DIST_BASE_URL !== ${JSON.stringify(distBase)}) process.exit(3);\nconsole.log("gate-ok", process.env.TB_RELEASE_TAG);\n`,
+    },
+    { kind: "library", distBaseUrl: distBase, preReleaseChecks: ["scripts/ok.ts"] },
+    { CI_COMMIT_TAG: "relay-v0.1.0" },
+  );
+  assert.equal(good.code, 0, good.out);
+  assert.match(good.out, /gate-ok relay-v0\.1\.0/);
+  assert.match(good.out, /1 check\(s\) passed/);
+  const bad = runPreRelease(
+    { "scripts/ok.ts": "", "scripts/bad.ts": "process.exit(7);\n", "scripts/never.ts": 'console.log("RAN-AFTER-FAILURE");\n' },
+    { kind: "library", preReleaseChecks: ["scripts/ok.ts", "scripts/bad.ts", "scripts/never.ts"] },
+  );
+  assert.notEqual(bad.code, 0);
+  assert.match(bad.out, /scripts\/bad\.ts failed/);
+  assert.doesNotMatch(bad.out, /RAN-AFTER-FAILURE/, "the first failure stops the run");
+  const missing = runPreRelease({}, { kind: "library", preReleaseChecks: ["scripts/nope.ts"] });
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.out, /scripts\/nope\.ts not found/);
+  const tokened = runPreRelease({ "scripts/ok.ts": "" }, { kind: "library", preReleaseChecks: ["scripts/ok.ts"] }, { GITHUB_TOKEN: "x" });
+  assert.notEqual(tokened.code, 0);
+  assert.match(tokened.out, /without GITHUB_TOKEN/);
+});
+
+test("ci-v9.6 template: pre-release step after gen; image-check and release-record wait for it; workflow runs the checks on the tag", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  assert.equal(stepScript(tpl, "pre-release"), "node .tb-ci/tb-ci.ts pre-release");
+  assert.match(tpl.split("\n")[0] as string, /ci-v9\.6/);
+  const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
+  assert.match(wf, /TB_CI_REF: ci-v9\.6/);
+  const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
+  assert.ok(build.indexOf("runPreReleaseChecks(cfg, root)") > 0, "gh-build runs the checks on the tag");
+  assert.ok(
+    build.indexOf("runPreReleaseChecks(cfg, root); //") < build.indexOf("await cmdPackagePack()"),
+    "package tags: checks run before the tarball is packed",
+  );
+  assert.ok(build.indexOf("runPreReleaseChecks(cfg, root);") < build.indexOf('"docker",'), "app tags: checks run before the image build");
+});
+
+test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list, pending until its GitHub repo exists, not a registry product", () => {
+  assert.ok(OPT2_REPOS.includes(cliRepo));
+  for (const r of PENDING_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is pending but not an opt2 repo`);
+  assert.deepEqual([...PENDING_REPOS], [cliRepo], "only the CLI repo is pending; any other 404 stays an alarm");
+  const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
+  const listed = /const REPOS = \[([\s\S]*?)\]\.map/.exec(activate)?.[1] ?? "";
+  const names = [...listed.matchAll(/"([a-z-]+)"/g)].map((m) => `opt2-tealbrick-${m[1]}`);
+  assert.deepEqual(names, OPT2_REPOS, "ops/woodpecker-activate.ts lists the same repos as OPT2_REPOS, in the same order");
+  // the CLI ships package tarballs (kind library, no images), like sdk and packages: no release-index product
+  const products = JSON.parse(readFileSync(new URL("../registry/products.json", import.meta.url), "utf8")) as Record<string, { repo: string }>;
+  assert.ok(!Object.values(products).some((p) => p.repo.endsWith(`/${cliRepo}`)));
+  assert.ok(!Object.values(products).some((p) => p.repo.endsWith("/opt2-tealbrick-sdk")));
 });

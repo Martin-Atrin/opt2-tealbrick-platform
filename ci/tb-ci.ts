@@ -5,6 +5,7 @@
 //   install                     install dependencies per project path (frozen lockfile)
 //   run <script>                run a standard script per project path (typecheck|lint|test|conformance|build)
 //   gen                         BSA-03: committed gen/ not stale, `gen` script produces every tb-gen kind, tb-gen check passes
+//   pre-release                 ci-v9.6: run tealbrick-ci.json preReleaseChecks (repo scripts) on every pipeline; gh-build runs them again on the tag
 //   audit-templates             (platform cron) every opt2 repo's template ref >= ci/MIN_TEMPLATE
 //   plan-images                 write .tb-ci/images.sh for the kaniko steps
 //   release-record              (tag v*) validate + print the release; no token, no key (C62); the platform signer indexes it
@@ -12,7 +13,7 @@
 //   pin-tarballs [<repoDir>]    (local) pin sha512 of GitHub-release tarballs the lockfile has no integrity for (S3)
 //   package-pack                (tag <pkg>-v*) npm pack --ignore-scripts without tokens, then the pack guard (used by gh-build after the build)
 //   gh-build / gh-publish       (C72, GitHub Actions) build without a write token / push images + attach assets, no repo code
-//   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index
+//   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index (GitHub asset URL or a platform dist host)
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
 //   registry-add-source ...     (C29 interim) dev entry built from source at a pushed commit
 //   adopt <repoDir> --kind <k>  (local) install the standard into a repo
@@ -65,7 +66,19 @@ export const OPT2_REPOS = [
   "inbox",
   "fleet",
   "evolution",
+  "cli",
 ].map((n) => `opt2-tealbrick-${n}`);
+/** Repos in OPT2_REPOS whose GitHub repo does not exist yet (opt2-tealbrick-cli is local only, C158/C159). The template audit and
+ *  registry-sync skip a 404 for these and ONLY these; a 404 for any other repo stays an alarm. Remove the entry when the repo is pushed. */
+export const PENDING_REPOS: readonly string[] = ["opt2-tealbrick-cli"];
+/** ci-v9.6 (C154/C157): public download hosts for the release assets of private repos. A repo opts in with `distBaseUrl` in
+ *  tealbrick-ci.json (or TB_DIST_BASE_URL); only these bases are accepted, so a config can never point dependencies at another host.
+ *  The asset layout under a base is `<base>/<repo>-<release tag>/<file>` (one path segment, so a GitHub dist repo's release tag and a
+ *  plain host path look the same). Change this list by platform PR only. */
+export const DIST_BASES: readonly string[] = [
+  "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download", // assets-only public repo (now)
+  "https://releases.tealbrick.com", // our own download address (prod)
+];
 export const MIN_TEMPLATE_PATH = "ci/MIN_TEMPLATE";
 export type Kind = (typeof KINDS)[number];
 
@@ -90,6 +103,8 @@ export interface CiConfig {
   conformance: boolean;
   images: ImageSpec[];
   postgres: boolean; // ci-v9.1: opt-in ephemeral Postgres for the unit step (TB_TEST_DATABASE_URL)
+  distBaseUrl: string | null; // ci-v9.6: public dist host base for dependency URLs of this repo's releases (null = GitHub releases of the repo)
+  preReleaseChecks: string[]; // ci-v9.6: repo-relative .ts scripts the pipeline runs before a release can be tagged
 }
 
 /** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
@@ -333,7 +348,7 @@ export function versionFromTag(tag: string): string {
 export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("tealbrick-ci.json must be an object");
   const o = raw as Record<string, unknown>;
-  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres"]);
+  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres", "distBaseUrl", "preReleaseChecks"]);
   for (const k of Object.keys(o)) if (!allowed.has(k)) throw new Error(`unknown field ${k}`);
   if (!KINDS.includes(o.kind as Kind)) throw new Error(`kind must be one of ${KINDS.join(", ")}`);
   const kind = o.kind as Kind;
@@ -344,6 +359,8 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof conformance !== "boolean") throw new Error("conformance must be boolean");
   const postgres = o.postgres === undefined ? false : o.postgres;
   if (typeof postgres !== "boolean") throw new Error("postgres must be boolean");
+  const distBaseUrl = o.distBaseUrl === undefined ? null : normalizeDistBase(o.distBaseUrl, "distBaseUrl");
+  const preReleaseChecks = parsePreReleaseChecks(o.preReleaseChecks);
   const imagesRaw = o.images === undefined ? [] : o.images;
   if (!Array.isArray(imagesRaw)) throw new Error("images must be a list");
   const names = new Set<string>();
@@ -389,11 +406,73 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
       throw new Error(`service ${im.product}/${im.service} declared twice`);
   }
-  return { kind, paths, conformance, images, postgres };
+  return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks };
 }
 
 function safeRel(p: string): boolean {
   return p.length > 0 && !p.startsWith("/") && !p.split("/").includes("..");
+}
+
+/** ci-v9.6: a dist base must be one of DIST_BASES (exact, trailing slash dropped). Returns the normalised base. */
+export function normalizeDistBase(v: unknown, what: string): string {
+  if (typeof v !== "string") throw new Error(`${what} must be a string`);
+  const base = v.replace(/\/+$/, "");
+  if (!DIST_BASES.includes(base)) throw new Error(`${what} must be one of the platform dist hosts (${DIST_BASES.join(", ")}), got ${JSON.stringify(v)}`);
+  return base;
+}
+
+/** ci-v9.6: the dist base in force for a repo: env TB_DIST_BASE_URL wins over tealbrick-ci.json `distBaseUrl`; null = GitHub releases (unchanged). */
+export function resolveDistBase(cfg: { distBaseUrl: string | null }, env: NodeJS.ProcessEnv = process.env): string | null {
+  const fromEnv = env.TB_DIST_BASE_URL;
+  if (fromEnv !== undefined && fromEnv !== "") return normalizeDistBase(fromEnv, "TB_DIST_BASE_URL");
+  return cfg.distBaseUrl;
+}
+
+/** ci-v9.6: the one path segment of a release on a dist host: `<repo>-<release tag>` (e.g. opt2-tealbrick-cli-relay-v0.1.0). */
+export function distTag(repo: string, releaseTag: string): string {
+  return `${repo}-${releaseTag}`;
+}
+
+const DIST_TAIL_RE = /^opt2-tealbrick-[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
+
+/** ci-v9.6: a package tarball on one of the platform dist hosts (`<base>/<repo>-<dir>-v<ver>/<scope-name>-<ver>.tgz`). */
+export function isDistTarballUrl(v: string): boolean {
+  return DIST_BASES.some((b) => v.startsWith(`${b}/`) && DIST_TAIL_RE.test(v.slice(b.length + 1)));
+}
+
+/** The only accepted forms of an @opt2-tealbrick/* dependency URL: a GitHub release tarball of an opt2 repo, or a tarball on a dist host. */
+export function isReleaseTarballUrl(v: string): boolean {
+  return RELEASE_URL_RE.test(v) || isDistTarballUrl(v);
+}
+
+/** ci-v9.6: where a desktop artifact URL comes from. GitHub release URL: repo and tag are in the path (as before). Dist URL:
+ *  `<base>/<repo>-<tag>/<file>`; the caller names the repo, and the segment must start with it. */
+export function artifactSource(url: string, repoArg?: string): { repo: string; tag: string } {
+  // the dist base on GitHub is itself a github.com release URL, so the dist hosts are matched FIRST
+  const base = DIST_BASES.find((b) => url.startsWith(`${b}/`));
+  if (base) {
+    if (!repoArg || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repoArg)) throw new Error("--repo opt2-tealbrick-<name> is required with a dist host URL");
+    const m = /^([^/]+)\/[^/]+$/.exec(url.slice(base.length + 1));
+    if (!m || !(m[1] as string).startsWith(`${repoArg}-`)) throw new Error(`a dist URL must look like ${base}/${repoArg}-<release tag>/<file>`);
+    return { repo: repoArg, tag: (m[1] as string).slice(repoArg.length + 1) };
+  }
+  const gh = /^https:\/\/github\.com\/Martin-Atrin\/(opt2-tealbrick-[a-z0-9-]+)\/releases\/download\/([^/]+)\/[^/]+$/.exec(url);
+  if (gh) return { repo: gh[1] as string, tag: gh[2] as string };
+  throw new Error("--url must be a GitHub release asset URL of an opt2 repo or a file on a platform dist host");
+}
+
+/** ci-v9.6: `preReleaseChecks` in tealbrick-ci.json: repo-relative TypeScript files (run as `node <file>` from the repo root). */
+export function parsePreReleaseChecks(raw: unknown): string[] {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || raw.length > 20) throw new Error("preReleaseChecks must be a list of at most 20 script paths");
+  const seen = new Set<string>();
+  for (const [i, p] of raw.entries()) {
+    if (typeof p !== "string" || !safeRel(p) || !/^[A-Za-z0-9._/-]+\.ts$/.test(p))
+      throw new Error(`preReleaseChecks[${i}] must be a repo-relative .ts file path (TypeScript only), got ${JSON.stringify(p)}`);
+    if (seen.has(p)) throw new Error(`preReleaseChecks lists ${p} twice`);
+    seen.add(p);
+  }
+  return [...seen];
 }
 
 export function requiredScripts(cfg: CiConfig, multiPackage = false): string[] {
@@ -443,11 +522,11 @@ export function checkDependencies(pkg: Record<string, unknown>, where: string, l
       if (!name.startsWith("@opt2-tealbrick/")) continue;
       if (v.startsWith("workspace:")) {
         if (!localNames.has(name)) errors.push(`${where}: ${field}.${name}: workspace: is only allowed for packages in this repo`);
-      } else if (RELEASE_URL_RE.test(v)) {
+      } else if (isReleaseTarballUrl(v)) {
         urls.push(v);
       } else {
         errors.push(
-          `${where}: ${field}.${name}: must be a GitHub release tarball URL (https://github.com/Martin-Atrin/opt2-tealbrick-<repo>/releases/download/<pkg>-v<ver>/<file>.tgz), got ${JSON.stringify(v)}`,
+          `${where}: ${field}.${name}: must be a GitHub release tarball URL (https://github.com/Martin-Atrin/opt2-tealbrick-<repo>/releases/download/<pkg>-v<ver>/<file>.tgz) or a tarball on a platform dist host (${DIST_BASES.join(" | ")}/<repo>-<pkg>-v<ver>/<file>.tgz), got ${JSON.stringify(v)}`,
         );
       }
     }
@@ -486,8 +565,11 @@ export function tarballName(name: string, version: string): string {
   return `${name.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
 }
 
-export function releaseUrl(repo: string, dir: string, name: string, version: string): string {
-  return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${tarballName(name, version)}`;
+/** URL of a released package tarball. Default: the GitHub release of the source repo. With a dist base (ci-v9.6): the dist host. */
+export function releaseUrl(repo: string, dir: string, name: string, version: string, distBase: string | null = null): string {
+  const file = tarballName(name, version);
+  if (distBase) return `${normalizeDistBase(distBase, "distBase")}/${distTag(repo, `${dir}-v${version}`)}/${file}`;
+  return `https://github.com/${OWNER}/${repo}/releases/download/${dir}-v${version}/${file}`;
 }
 
 /** ci-v9.1 (C75): the build that runs before `npm pack` on a package tag. The repo's root `build` script (the same one the
@@ -760,20 +842,25 @@ export function validateOffers(raw: unknown): Offer[] {
 
 export const INTEGRITY_FILE = "tealbrick-integrity.json";
 
+/** A lockfile entry that needs `integrity`: a GitHub release tarball or (ci-v9.6) a tarball on a dist host. */
+function isLockedReleaseTarball(url: string): boolean {
+  return /\/releases\/download\/.+\.tgz$/.test(url) || (url.endsWith(".tgz") && DIST_BASES.some((b) => url.startsWith(`${b}/`)));
+}
+
 /** S3 (C59): GitHub-release tarballs in a lockfile and whether the lockfile itself carries integrity for them. */
 export function lockfileTarballs(lockText: string, kind: "pnpm" | "npm"): { url: string; integrity: string | null }[] {
   const out = new Map<string, string | null>();
   if (kind === "npm") {
     const lock = JSON.parse(lockText) as { packages?: Record<string, { resolved?: string; integrity?: string }> };
     for (const v of Object.values(lock.packages ?? {})) {
-      if (v.resolved && /\/releases\/download\/.+\.tgz$/.test(v.resolved)) out.set(v.resolved, v.integrity ?? out.get(v.resolved) ?? null);
+      if (v.resolved && isLockedReleaseTarball(v.resolved)) out.set(v.resolved, v.integrity ?? out.get(v.resolved) ?? null);
     }
   } else {
     for (const line of lockText.split("\n")) {
       const m = /resolution:\s*\{([^}]*)\}/.exec(line);
       if (!m) continue;
       const tarball = /tarball:\s*([^,\s}]+)/.exec(m[1])?.[1];
-      if (!tarball || !/\/releases\/download\/.+\.tgz$/.test(tarball)) continue;
+      if (!tarball || !isLockedReleaseTarball(tarball)) continue;
       out.set(tarball, /integrity:\s*([^,\s}]+)/.exec(m[1])?.[1] ?? null);
     }
   }
@@ -802,7 +889,8 @@ export function assetChecksums(name: string, data: Uint8Array): { sha256: string
 /** C62/BSD-10: write `integrity` into every pnpm `resolution: {tarball: …}` for a GitHub-release tarball. Pure. */
 export function addPnpmIntegrity(lockText: string, integrityOf: (url: string) => string): { text: string; changed: number } {
   let changed = 0;
-  const text = lockText.replace(/resolution:\s*\{tarball:\s*(https:\/\/github\.com\/[^\s,}]+\/releases\/download\/[^\s,}]+\.tgz)\s*\}/g, (_m, url: string) => {
+  const text = lockText.replace(/resolution:\s*\{tarball:\s*(https:\/\/[^\s,}]+\.tgz)\s*\}/g, (m, url: string) => {
+    if (!/^https:\/\/github\.com\/[^\s,}]+\/releases\/download\//.test(url) && !isLockedReleaseTarball(url)) return m;
     changed++;
     return `resolution: {integrity: ${integrityOf(url)}, tarball: ${url}}`;
   });
@@ -1022,7 +1110,7 @@ async function cmdSetup(): Promise<void> {
   }
   const cfg = loadConfig(root);
   log(
-    `kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} postgres=${cfg.postgres} images=${cfg.images.map((i) => i.name).join(",") || "-"}`,
+    `kind=${cfg.kind} paths=${cfg.paths.join(",")} conformance=${cfg.conformance} postgres=${cfg.postgres} dist=${resolveDistBase(cfg) ?? "-"} preReleaseChecks=${cfg.preReleaseChecks.length} images=${cfg.images.map((i) => i.name).join(",") || "-"}`,
   );
   // ci-v9.1: the template's `postgres` step starts the database only when this marker exists (opt-in)
   mkdirSync(join(root, ".tb-ci"), { recursive: true });
@@ -1063,6 +1151,7 @@ async function cmdSetup(): Promise<void> {
       errors.push(...checkServiceImages(cfg, im.product, man.runtime?.services ?? []).map((e) => `image ${im.name}: ${e}`));
     }
   }
+  for (const rel of missingPreReleaseChecks(cfg.preReleaseChecks, (r) => existsSync(join(root, r)))) errors.push(`preReleaseChecks: ${rel} not found`);
   for (const df of findDockerfiles(root)) {
     const lines = dockerfileVolumeLines(readFileSync(join(root, df), "utf8"));
     if (lines.length)
@@ -1193,6 +1282,57 @@ function cmdGen(): void {
   }
 }
 
+/** ci-v9.6: environment for a pre-release check: the effective dist base and the release tag (empty outside a tag run). Pure. */
+export function preReleaseEnv(cfg: { distBaseUrl: string | null }, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env, TB_PRE_RELEASE: "1", TB_RELEASE_TAG: env.CI_COMMIT_TAG ?? "" };
+  const base = resolveDistBase(cfg, env);
+  if (base) out.TB_DIST_BASE_URL = base;
+  else delete out.TB_DIST_BASE_URL;
+  return out;
+}
+
+/** ci-v9.6: `preReleaseChecks` entries that are not files in the repo. Pure over `exists`. */
+export function missingPreReleaseChecks(checks: readonly string[], exists: (rel: string) => boolean): string[] {
+  return checks.filter((rel) => !exists(rel));
+}
+
+/** ci-v9.6 pre-release gate: run every `preReleaseChecks` script (`node <file>`, repo root, no tokens). The first failure stops the run.
+ *  The Woodpecker `pre-release` step runs this on every pipeline (so a green pipeline means the gate passed before anyone tags), and
+ *  gh-build runs it again on the tag, before images or tarballs are built. */
+function runPreReleaseChecks(cfg: CiConfig, root: string): void {
+  for (const k of ["GITHUB_TOKEN", "GH_TOKEN", "GHCR_TOKEN"]) if (process.env[k]) fail(`pre-release checks must run without ${k}`);
+  if (cfg.preReleaseChecks.length === 0) {
+    log("pre-release: no preReleaseChecks in tealbrick-ci.json; nothing to run");
+    return;
+  }
+  const missing = missingPreReleaseChecks(cfg.preReleaseChecks, (rel) => existsSync(join(root, rel)));
+  if (missing.length) fail(`preReleaseChecks: ${missing.join(", ")} not found`);
+  const env = preReleaseEnv(cfg, process.env);
+  for (const rel of cfg.preReleaseChecks) {
+    log(`pre-release: node ${rel}`);
+    try {
+      execFileSync(process.execPath, [rel], { cwd: root, stdio: "inherit", env, timeout: 600_000 });
+    } catch {
+      fail(`pre-release check ${rel} failed; no release may be tagged until it passes`);
+    }
+  }
+  log(`pre-release: ${cfg.preReleaseChecks.length} check(s) passed`);
+}
+
+function cmdPreRelease(): void {
+  const root = repoRoot();
+  runPreReleaseChecks(loadConfig(root), root);
+}
+
+/** gh-build: frozen, script-free install of every node path (checks may import the repo's dependencies). */
+function installAllPaths(cfg: CiConfig, root: string): void {
+  for (const p of nodePaths(cfg, root)) {
+    const dir = join(root, p);
+    if (packageManager(dir) === "pnpm") sh("corepack", ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"], dir);
+    else sh("npm", ["ci", "--ignore-scripts"], dir);
+  }
+}
+
 /** Collects `<dir>/*.tgz` built by an earlier tokenless step: [file name, bytes]. Names are checked, content is the repo's own. */
 function builtTarballs(dir: string, nameRe: RegExp): [string, Buffer][] {
   if (!existsSync(dir)) return [];
@@ -1215,6 +1355,10 @@ async function cmdAuditTemplates(): Promise<void> {
   const bad: string[] = [];
   for (const repo of OPT2_REPOS) {
     const res = await fetch(`https://raw.githubusercontent.com/${OWNER}/${repo}/main/.woodpecker/ci.yaml`);
+    if (res.status === 404 && PENDING_REPOS.includes(repo)) {
+      log(`PEND ${repo}: no GitHub repo yet (PENDING_REPOS); skipped`);
+      continue;
+    }
     const ref = res.ok ? (/TB_CI_REF: (\S+)/.exec(await res.text())?.[1] ?? "none") : "none";
     const ok = !belowMinimum(ref, min);
     log(`${ok ? "OK  " : "FAIL"} ${repo}: ${ref}`);
@@ -1260,6 +1404,10 @@ async function cmdGhBuild(): Promise<void> {
   const appTag = /^v(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$/.exec(tag);
   if (appTag) {
     const version = appTag[1];
+    if (cfg.preReleaseChecks.length > 0) {
+      installAllPaths(cfg, root);
+      runPreReleaseChecks(cfg, root);
+    }
     for (const im of cfg.images) {
       const ref = `${IMAGE_NAMESPACE}/${im.name}:${version}`;
       sh(
@@ -1304,6 +1452,7 @@ async function cmdGhBuild(): Promise<void> {
       const dirs = nodePaths(cfg, root).map((p) => ({ dir: join(root, p), pm: packageManager(join(root, p)) }));
       // ci-v9.1 (C75): install, then BUILD, then pack (still read-only token); the pack guard checks dist/ is in the tarball
       for (const c of packageReleaseCommands(dirs, target.projectDir, rootScripts, target.name)) sh(c.cmd, c.args, c.cwd);
+      runPreReleaseChecks(cfg, root); // ci-v9.6: after install + build, before the tarball is packed
       await cmdPackagePack();
       for (const [name, data] of builtTarballs(join(root, ".tb-ci/pack"), PKG_NAME_RE)) writeFileSync(join(out, "assets", name), data);
     }
@@ -1825,6 +1974,10 @@ async function cmdRegistrySync(): Promise<void> {
   const bindings = loadProductBindings();
   for (const repo of OPT2_REPOS) {
     const tags = await gh("GET", `/repos/${OWNER}/${repo}/tags?per_page=50`);
+    if (tags.status === 404 && PENDING_REPOS.includes(repo)) {
+      log(`registry-sync: ${repo} has no GitHub repo yet (PENDING_REPOS); skipped`);
+      continue;
+    }
     for (const t of (tags.json ?? []) as { name: string; commit: { sha: string } }[]) {
       if (!/^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t.name)) continue;
       const version = t.name.slice(1);
@@ -1882,8 +2035,13 @@ async function cmdRegistryAddDesktop(args: string[]): Promise<void> {
   const upgradeFrom = argValue(args, "--upgrade-from") ?? "*";
   const notarized = !args.includes("--not-notarized");
   if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) fail("--version <semver> required");
-  if (!url || !/^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\//.test(url))
-    fail("--url must be a GitHub release asset URL of an opt2 repo");
+  if (!url) fail("--url <asset URL> required");
+  let src: { repo: string; tag: string };
+  try {
+    src = artifactSource(url, argValue(args, "--repo")); // ci-v9.6: a GitHub release asset, or a file on a platform dist host (--repo)
+  } catch (e) {
+    fail((e as Error).message);
+  }
   if (!sha256 || !/^[0-9a-f]{64}$/.test(sha256)) fail("--sha256 <hex> required");
   const res = await fetch(url, { redirect: "follow" });
   if (!res.ok) fail(`artifact not reachable: HTTP ${res.status}`);
@@ -1892,7 +2050,7 @@ async function cmdRegistryAddDesktop(args: string[]): Promise<void> {
     .digest("hex");
   if (got !== sha256) fail(`artifact sha256 mismatch (downloaded ${got})`);
   const m = await loadManifestPkg(repoRoot());
-  const repo = url.split("/")[4];
+  const repo = src.repo;
   await publishIndex(m, [
     {
       id: newId("rel"),
@@ -1912,7 +2070,7 @@ async function cmdRegistryAddDesktop(args: string[]): Promise<void> {
       upgradeFrom,
       repo: `${OWNER}/${repo}`,
       commit: null,
-      tag: url.split("/")[7] ?? null,
+      tag: src.tag,
       publishedAt: new Date().toISOString(),
     },
   ]);
@@ -2061,6 +2219,7 @@ async function cmdPackagePack(): Promise<void> {
   }
   const target = packTarget(cfg, root, tag);
   const all = target.all;
+  const distBase = resolveDistBase(cfg);
   // Rewrite in-repo workspace deps to their released tarball URLs; the release must exist.
   const pjPath = join(target.abs, "package.json");
   const original = readFileSync(pjPath, "utf8");
@@ -2072,9 +2231,14 @@ async function cmdPackagePack(): Promise<void> {
       if (!spec.startsWith("workspace:")) continue;
       const dep = all.find((w) => w.name === name);
       if (!dep || !name.startsWith("@opt2-tealbrick/")) fail(`${field}.${name}: only @opt2-tealbrick/* workspace dependencies can be released`);
-      const url = releaseUrl(repo, dep.dir, dep.name, dep.version);
+      // ci-v9.6: with a dist base (tealbrick-ci.json distBaseUrl / TB_DIST_BASE_URL) the dependency URL points at the dist host
+      // (the signed lockfile integrity of the consumer still pins the bytes); default stays the GitHub release of this repo.
+      const url = releaseUrl(repo, dep.dir, dep.name, dep.version, distBase);
       const res = await fetch(url, { method: "HEAD", redirect: "follow" });
-      if (!res.ok) fail(`${name}@${dep.version} is not released yet (${url}); tag ${dep.dir}-v${dep.version} first`);
+      if (!res.ok)
+        fail(
+          `${name}@${dep.version} is not released yet (${url}); tag ${dep.dir}-v${dep.version} first${distBase ? " and publish its assets to the dist host" : ""}`,
+        );
       deps[name] = url;
     }
   }
@@ -2175,6 +2339,8 @@ async function main(argv: string[]): Promise<void> {
       return cmdRun(rest[0]);
     case "gen":
       return cmdGen();
+    case "pre-release":
+      return cmdPreRelease();
     case "gh-build":
       return cmdGhBuild();
     case "gh-publish":
@@ -2203,7 +2369,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|audit-templates|gh-build|gh-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|pre-release|audit-templates|gh-build|gh-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
       );
   }
 }

@@ -28,6 +28,7 @@ const REPOS = [
   "inbox",
   "fleet",
   "evolution",
+  "cli", // C158: local only until Martin creates the GitHub repo; do not run this script before that (githubId() would fail)
 ].map((n) => `opt2-tealbrick-${n}`);
 const CFG = join(homedir(), ".config/opt2-tealbrick");
 

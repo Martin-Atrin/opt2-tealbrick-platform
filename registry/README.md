@@ -57,7 +57,7 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
 ## Writers (only these)
 - The platform `registry-sync` GitHub Actions workflow (every 15 min + manual; environment `registry`, the only job with the signing key) from `v*` tags whose images the repo's `opt2-release` workflow pushed to ghcr; it re-derives every digest and checks provenance before signing (SEC-03, C72; see ci/README.md).
 - `node ci/tb-ci.ts registry-add-source --product <id> --kind app|bridge --repo opt2-tealbrick-<x> --ref <sha> --dockerfile <path> [--context <dir>] --version <semver> [--manifest tealbrick.manifest.json | --runtime registry/inputs/bridge-runtime-<v>.json]` (C29 interim; always channel dev).
-- `node ci/tb-ci.ts registry-add-desktop --product tbd --version <semver> --url <GitHub release asset> --sha256 <hex> [--min-os 14.0]` (TBD release Mac; downloads and checks the sha256 first).
+- `node ci/tb-ci.ts registry-add-desktop --product tbd --version <semver> --url <GitHub release asset | platform dist file> [--repo opt2-tealbrick-<name>, required for a dist URL] --sha256 <hex> [--min-os 14.0]` (TBD release Mac; downloads and checks the sha256 first). Dist hosts: `ci/README.md`, "Dist host for the assets of private repos".
 - `node ci/tb-ci.ts registry-sign` (offers changed / re-sign).
 Local runs need `GITHUB_TOKEN` in the environment (e.g. `GITHUB_TOKEN="$(gh auth token)"`, never echoed), `RELEASE_SIGNING_KEY_FILE`, and the manifest package (`TB_MANIFEST_PKG` release URL, or `TB_MANIFEST_MODULE` path to a built package).
 
