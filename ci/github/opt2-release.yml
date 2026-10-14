@@ -1,4 +1,4 @@
-# opt2 release publishing (template ci-v9.6, C72). GENERATED from Martin-Atrin/opt2-tealbrick-platform: ci/github/opt2-release.yml.
+# opt2 release publishing (template ci-v9.7, C72). GENERATED from Martin-Atrin/opt2-tealbrick-platform: ci/github/opt2-release.yml.
 # Do not edit in a repo: Woodpecker setup fails on drift. Woodpecker runs every other CI stage.
 # Images go to ghcr.io/martin-atrin/<name> with the built-in GITHUB_TOKEN (no personal token). Two jobs:
 #   build   — runs repo code (docker build, tb-gen kit, build + npm pack + pack guard) with a READ-ONLY token
@@ -13,8 +13,8 @@ concurrency:
   group: opt2-release-${{ github.ref }}
   cancel-in-progress: false
 env:
-  TB_CI_REF: ci-v9.6
-  TB_CI_SHA256: "8458c92e5bbecd6216a9155bcfd6491b40faff4a02c0160815fde421cd54b633"
+  TB_CI_REF: ci-v9.7
+  TB_CI_SHA256: "f6cb348e298e848eae3ac2db9c5ccfde7947a9c00580173418e0e715ffa84861"
 jobs:
   build:
     runs-on: ubuntu-24.04

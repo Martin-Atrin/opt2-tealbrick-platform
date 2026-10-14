@@ -50,7 +50,9 @@ import {
   packageManagerPinned,
   packageReleaseCommands,
   packEntryTargets,
+  packScriptOutputProblems,
   parsePackageTag,
+  parsePackScripts,
   parsePreReleaseChecks,
   preReleaseEnv,
   productBindingProblem,
@@ -1100,9 +1102,9 @@ test("ci-v9.6 pre-release step: no-op without checks, passes a good gate, fails 
 test("ci-v9.6 template: pre-release step after gen; image-check and release-record wait for it; workflow runs the checks on the tag", () => {
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   assert.equal(stepScript(tpl, "pre-release"), "node .tb-ci/tb-ci.ts pre-release");
-  assert.match(tpl.split("\n")[0] as string, /ci-v9\.6/);
+  assert.match(tpl.split("\n")[0] as string, /ci-v9\.7/, "current template (ci-v9.7 keeps the ci-v9.6 pre-release step)");
   const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
-  assert.match(wf, /TB_CI_REF: ci-v9\.6/);
+  assert.match(wf, /TB_CI_REF: ci-v9\.7/);
   const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
   const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root)") > 0, "gh-build runs the checks on the tag");
@@ -1325,4 +1327,59 @@ test("C174: registry-sync reads the read token from the workflow secret and neve
   const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
   assert.match(src, /if \(repo === CLI_REPO\) continue;/, "the generic v* loop does not read the private repo");
   assert.equal(loadProductBindings().cli?.kind, "cli");
+});
+
+// ---------- ci-v9.7 (C173/C175): packScripts ----------
+
+test("ci-v9.7 packScripts: config parsing (opt-in, TypeScript only, package dir keys) and the schema lists the field", () => {
+  const base = { kind: "library", paths: ["."] };
+  assert.deepEqual(validateConfig(base, "opt2-tealbrick-cli").packScripts, {}, "absent = template npm pack (other repos unchanged)");
+  assert.deepEqual(validateConfig({ ...base, packScripts: { cli: "scripts/pack-cli.ts" } }, "opt2-tealbrick-cli").packScripts, { cli: "scripts/pack-cli.ts" });
+  assert.deepEqual(parsePackScripts(undefined), {});
+  assert.throws(() => parsePackScripts(["scripts/pack-cli.ts"]), /must be an object/);
+  assert.throws(() => parsePackScripts({ cli: "scripts/pack-cli.js" }), /TypeScript only/);
+  assert.throws(() => parsePackScripts({ cli: "../x/pack.ts" }), /repo-relative/);
+  assert.throws(() => parsePackScripts({ cli: "/abs/pack.ts" }), /repo-relative/);
+  assert.throws(() => parsePackScripts({ "CLI-v1": "scripts/pack.ts" }), /package directory/);
+  assert.throws(() => parsePackScripts({ cli: 1 }), /repo-relative/);
+  const schema = JSON.parse(readFileSync(new URL("./tealbrick-ci.schema.json", import.meta.url), "utf8")) as { properties: Record<string, unknown> };
+  assert.ok(schema.properties.packScripts, "schema has packScripts");
+  const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const build = src.slice(src.indexOf("async function cmdGhBuild"), src.indexOf("async function cmdGhPublish"));
+  assert.ok(
+    build.indexOf("runPreReleaseChecks(cfg, root); // ci-v9.6: after install") < build.indexOf('packScript, "--out", dir'),
+    "pack script runs after install/build/checks",
+  );
+  assert.ok(build.includes("await cmdPackagePack();"), "repos without packScripts keep npm pack");
+});
+
+test("ci-v9.7 packScripts: the output guard (exactly the named tarball, right package, pack guard; fires and stays quiet)", () => {
+  const pj = (o: Record<string, unknown> = {}) => JSON.stringify({ name: "@opt2-tealbrick/cli", version: "0.2.0", bin: { tealbrick: "dist/main.js" }, ...o });
+  const good = makeTgz({ "package.json": pj(), "dist/main.js": "x" });
+  const files = (m: Record<string, Uint8Array>) => new Map(Object.entries(m));
+  assert.deepEqual(
+    packScriptOutputProblems(
+      files({ "opt2-tealbrick-cli-0.2.0.tgz": good, "opt2-tealbrick-cli-0.2.0.tgz.sha256": Buffer.from("x") }),
+      "@opt2-tealbrick/cli",
+      "0.2.0",
+    ),
+    [],
+  );
+  assert.match(packScriptOutputProblems(files({}), "@opt2-tealbrick/cli", "0.2.0").join(), /no \.tgz/);
+  assert.match(packScriptOutputProblems(files({ "cli.tgz": good }), "@opt2-tealbrick/cli", "0.2.0").join(), /exactly opt2-tealbrick-cli-0\.2\.0\.tgz/);
+  assert.match(
+    packScriptOutputProblems(files({ "opt2-tealbrick-cli-0.2.0.tgz": good, "opt2-tealbrick-relay-0.1.0.tgz": good }), "@opt2-tealbrick/cli", "0.2.0").join(),
+    /exactly/,
+  );
+  const wrong = makeTgz({ "package.json": pj({ version: "0.1.9" }), "dist/main.js": "x" });
+  assert.match(
+    packScriptOutputProblems(files({ "opt2-tealbrick-cli-0.2.0.tgz": wrong }), "@opt2-tealbrick/cli", "0.2.0").join(),
+    /contains @opt2-tealbrick\/cli@0\.1\.9/,
+  );
+  const noDist = makeTgz({ "package.json": pj() });
+  assert.match(packScriptOutputProblems(files({ "opt2-tealbrick-cli-0.2.0.tgz": noDist }), "@opt2-tealbrick/cli", "0.2.0").join(), /missing from the tarball/);
+  assert.match(
+    packScriptOutputProblems(files({ "opt2-tealbrick-cli-0.2.0.tgz": Buffer.from("nope") }), "@opt2-tealbrick/cli", "0.2.0").join(),
+    /not a readable/,
+  );
 });

@@ -1,4 +1,4 @@
-# opt2 CI standard (template ci-v9.6)
+# opt2 CI standard (template ci-v9.7)
 
 One Woodpecker pipeline for every opt2 repo. It is an enforced standard, not a convention:
 every repo's `.woodpecker/ci.yaml` is a byte-identical copy of `ci/woodpecker/ci.yaml`, and the
@@ -125,6 +125,8 @@ Never run a global `docker/podman system prune` on the CI host (shared daemon).
 1. Edit `ci/tb-ci.ts` and/or `ci/woodpecker/ci.yaml`. For a new version, bump `TB_CI_REF` in the template.
 2. `pnpm stamp` (writes the runner sha256 into the template and `.woodpecker/ci.yaml`).
 3. Commit, tag `ci-vN`, push the tag. Re-run `adopt` in each repo (copies the new template).
+
+ci-v9.7 (C173/C175): opt-in `packScripts` in `tealbrick-ci.json`, `{ "<package dir>": "<repo-relative .ts>" }`. On a `<dir>-v<ver>` tag the release Action (build job, read-only token, network) runs `node <script> --out <empty dir>` from the repo root after install, build and `preReleaseChecks`, INSTEAD of the template's `npm pack` for that package. The script must write exactly `<scope-name>-<ver>.tgz` of the tagged package; the template refuses anything else (`packScriptOutputProblems`: one tarball, that name, that package@version, pack guard). The publish job (no repo code) computes and uploads `.sha256` + `.integrity` from the bytes as for every tarball; files the script writes beside the tarball are ignored. Used by the CLI repo for the bundled + shrinkwrap tarball (`"packScripts": { "cli": "scripts/pack-cli.ts" }`). Repos without the field are unchanged. **Migration:** an older runner refuses the field as unknown; adopt ci-v9.7 first, then add it. `MIN_TEMPLATE` stays `ci-v8`.
 
 ci-v9.6 (C154/C157/C158): two opt-in fields in `tealbrick-ci.json`, `distBaseUrl` and `preReleaseChecks`, a new `pre-release` template step, `opt2-tealbrick-cli` in `OPT2_REPOS` (marked pending in `PENDING_REPOS` until its GitHub repo exists: the template audit and registry-sync skip a 404 for it only), and the CLI repo in `ops/woodpecker-activate.ts` (not run). Default behaviour is unchanged: a repo without the new fields gets a green no-op `pre-release` step and the same github.com URLs. **Migration:** the two fields exist only in the ci-v9.6 runner; an older runner refuses them as unknown fields. A repo that wants them re-runs `node ci/tb-ci.ts adopt ../opt2-tealbrick-<name> --kind <kind>` (template + release workflow) and commits, then adds the fields. Repos that do not need them can stay on ci-v9.5 (`MIN_TEMPLATE` stays `ci-v8`). The repo-specific $schema ref in `tealbrick-ci.json` may move to `ci-v9.6` to get the new fields in the editor.
 

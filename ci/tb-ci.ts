@@ -105,6 +105,7 @@ export interface CiConfig {
   postgres: boolean; // ci-v9.1: opt-in ephemeral Postgres for the unit step (TB_TEST_DATABASE_URL)
   distBaseUrl: string | null; // ci-v9.6: public dist host base for dependency URLs of this repo's releases (null = GitHub releases of the repo)
   preReleaseChecks: string[]; // ci-v9.6: repo-relative .ts scripts the pipeline runs before a release can be tagged
+  packScripts: Record<string, string>; // ci-v9.7: package dir -> repo-relative .ts that builds that package's release tarball
 }
 
 /** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
@@ -359,7 +360,7 @@ export function versionFromTag(tag: string): string {
 export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("tealbrick-ci.json must be an object");
   const o = raw as Record<string, unknown>;
-  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres", "distBaseUrl", "preReleaseChecks"]);
+  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres", "distBaseUrl", "preReleaseChecks", "packScripts"]);
   for (const k of Object.keys(o)) if (!allowed.has(k)) throw new Error(`unknown field ${k}`);
   if (!KINDS.includes(o.kind as Kind)) throw new Error(`kind must be one of ${KINDS.join(", ")}`);
   const kind = o.kind as Kind;
@@ -372,6 +373,7 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof postgres !== "boolean") throw new Error("postgres must be boolean");
   const distBaseUrl = o.distBaseUrl === undefined ? null : normalizeDistBase(o.distBaseUrl, "distBaseUrl");
   const preReleaseChecks = parsePreReleaseChecks(o.preReleaseChecks);
+  const packScripts = parsePackScripts(o.packScripts);
   const imagesRaw = o.images === undefined ? [] : o.images;
   if (!Array.isArray(imagesRaw)) throw new Error("images must be a list");
   const names = new Set<string>();
@@ -417,7 +419,7 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
       throw new Error(`service ${im.product}/${im.service} declared twice`);
   }
-  return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks };
+  return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks, packScripts };
 }
 
 function safeRel(p: string): boolean {
@@ -484,6 +486,46 @@ export function parsePreReleaseChecks(raw: unknown): string[] {
     seen.add(p);
   }
   return [...seen];
+}
+
+/** ci-v9.7 (C173/C175): `packScripts` in tealbrick-ci.json: `{ "<package dir>": "<repo-relative .ts>" }`. On a `<dir>-v<ver>` tag the
+ *  release Action runs `node <script> --out <empty dir>` (repo root, after install + build + preReleaseChecks, no tokens) INSTEAD of
+ *  the template's `npm pack`; the script must write exactly `<scope-name>-<ver>.tgz` of the tagged package there. The template then
+ *  applies the same guards as to its own pack (name/version, pack guard) and computes .sha256/.integrity itself in the publish job. */
+export function parsePackScripts(raw: unknown): Record<string, string> {
+  if (raw === undefined) return {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error('packScripts must be an object { "<package dir>": "<script>.ts" }');
+  const out: Record<string, string> = {};
+  const entries = Object.entries(raw as Record<string, unknown>);
+  if (entries.length > 20) throw new Error("packScripts: at most 20 entries");
+  for (const [dir, p] of entries) {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(dir))
+      throw new Error(`packScripts: ${JSON.stringify(dir)} is not a package directory name (the <dir> of a <dir>-v<semver> tag)`);
+    if (typeof p !== "string" || !safeRel(p) || !/^[A-Za-z0-9._/-]+\.ts$/.test(p))
+      throw new Error(`packScripts.${dir} must be a repo-relative .ts file path (TypeScript only), got ${JSON.stringify(p)}`);
+    out[dir] = p;
+  }
+  return out;
+}
+
+/** ci-v9.7: what is wrong with a pack script's output directory (`files` = name -> bytes) for package `name@version`. Pure.
+ *  Exactly one .tgz, named as npm would name it, containing that package at that version, passing the pack guard. Side files
+ *  the script writes (e.g. its own .sha256) are ignored: the publish job derives the checksum files from the bytes. */
+export function packScriptOutputProblems(files: Map<string, Uint8Array>, name: string, version: string): string[] {
+  const want = tarballName(name, version);
+  const tgzs = [...files.keys()].filter((f) => f.endsWith(".tgz"));
+  if (tgzs.length !== 1 || tgzs[0] !== want) return [`the pack script must write exactly ${want}; it wrote ${tgzs.length ? tgzs.join(", ") : "no .tgz"}`];
+  const data = files.get(want) as Uint8Array;
+  let pkg: { name?: unknown; version?: unknown };
+  try {
+    const pj = tarEntries(data).get("package.json");
+    if (!pj) return [`${want} has no package/package.json`];
+    pkg = JSON.parse(pj.toString("utf8"));
+  } catch (e) {
+    return [`${want} is not a readable npm tarball: ${(e as Error).message}`];
+  }
+  if (pkg.name !== name || pkg.version !== version) return [`${want} contains ${String(pkg.name)}@${String(pkg.version)}, not ${name}@${version}`];
+  return checkPackedTarball(data);
 }
 
 export function requiredScripts(cfg: CiConfig, multiPackage = false): string[] {
@@ -1367,6 +1409,7 @@ async function cmdSetup(): Promise<void> {
     }
   }
   for (const rel of missingPreReleaseChecks(cfg.preReleaseChecks, (r) => existsSync(join(root, r)))) errors.push(`preReleaseChecks: ${rel} not found`);
+  for (const rel of missingPreReleaseChecks(Object.values(cfg.packScripts), (r) => existsSync(join(root, r)))) errors.push(`packScripts: ${rel} not found`);
   for (const df of findDockerfiles(root)) {
     const lines = dockerfileVolumeLines(readFileSync(join(root, df), "utf8"));
     if (lines.length)
@@ -1668,8 +1711,28 @@ async function cmdGhBuild(): Promise<void> {
       // ci-v9.1 (C75): install, then BUILD, then pack (still read-only token); the pack guard checks dist/ is in the tarball
       for (const c of packageReleaseCommands(dirs, target.projectDir, rootScripts, target.name)) sh(c.cmd, c.args, c.cwd);
       runPreReleaseChecks(cfg, root); // ci-v9.6: after install + build, before the tarball is packed
-      await cmdPackagePack();
-      for (const [name, data] of builtTarballs(join(root, ".tb-ci/pack"), PKG_NAME_RE)) writeFileSync(join(out, "assets", name), data);
+      const packScript = Object.hasOwn(cfg.packScripts, parsed.dir) ? cfg.packScripts[parsed.dir] : undefined;
+      if (packScript) {
+        // ci-v9.7: the repo's own pack script replaces `npm pack` for this package (e.g. the bundled CLI tarball, C173)
+        const dir = join(root, ".tb-ci/pack-script");
+        rmSync(dir, { recursive: true, force: true });
+        mkdirSync(dir, { recursive: true });
+        log(`gh-build: node ${packScript} --out ${dir} (packScripts.${parsed.dir})`);
+        try {
+          execFileSync(process.execPath, [packScript, "--out", dir], { cwd: root, stdio: "inherit", env: preReleaseEnv(cfg, process.env), timeout: 1_200_000 });
+        } catch {
+          fail(`pack script ${packScript} failed`);
+        }
+        const files = new Map(readdirSync(dir).map((f) => [f, new Uint8Array(readFileSync(join(dir, f)))] as const));
+        const problems = packScriptOutputProblems(files, target.name, target.version);
+        if (problems.length) fail(`packScripts.${parsed.dir} (ci-v9.7):\n  - ${problems.join("\n  - ")}`);
+        const file = tarballName(target.name, target.version);
+        writeFileSync(join(out, "assets", file), files.get(file) as Uint8Array);
+        log(`packed ${file} with ${packScript}; name/version + pack guard OK`);
+      } else {
+        await cmdPackagePack();
+        for (const [name, data] of builtTarballs(join(root, ".tb-ci/pack"), PKG_NAME_RE)) writeFileSync(join(out, "assets", name), data);
+      }
     }
   }
   plan.assets = readdirSync(join(out, "assets")).filter((f) => f.endsWith(".tgz"));

@@ -44,6 +44,13 @@
       },
       "description": "ci-v9.6: repo-relative TypeScript scripts run as `node <file>` from the repo root by the pre-release step on every pipeline (a green pipeline = gate passed before tagging) and again by the release Action on the tag, before images/tarballs are built. Non-zero exit blocks the release. Env: TB_PRE_RELEASE=1, TB_RELEASE_TAG (empty outside tags), TB_DIST_BASE_URL (when set). No tokens."
     },
+    "packScripts": {
+      "type": "object",
+      "maxProperties": 20,
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+\\.ts$" },
+      "description": "ci-v9.7: { \"<package dir>\": \"<repo-relative .ts>\" }. On a <dir>-v<semver> tag the release Action runs `node <script> --out <empty dir>` from the repo root (after install, build and preReleaseChecks; no tokens) instead of the template's npm pack. The script must write exactly <scope-name>-<version>.tgz of the tagged package; the template checks name/version and the pack guard and publishes .tgz + .sha256 + .integrity computed from the bytes."
+    },
     "images": {
       "type": "array",
       "items": {
