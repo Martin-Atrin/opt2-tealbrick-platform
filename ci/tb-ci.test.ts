@@ -25,7 +25,11 @@ import {
   cliTarballUrl,
   DEV_ONLY_PRODUCTS,
   DIST_BASES,
+  DIST_PRODUCTS,
+  distEntryProblem,
+  distReleaseFromAssets,
   distTag,
+  distTarballUrl,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
@@ -1120,7 +1124,7 @@ test("ci-v9.6 template: pre-release step after gen; image-check and release-reco
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root);") < build.indexOf('"docker",'), "app tags: checks run before the image build");
 });
 
-test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo pending since the CLI repo exists (C177); only registry product = cli (C174)", () => {
+test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo pending since the CLI repo exists (C177); registry products = cli (C174) + packages relay/harness-* (C181)", () => {
   assert.ok(OPT2_REPOS.includes(cliRepo));
   for (const r of PENDING_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is pending but not an opt2 repo`);
   assert.deepEqual([...PENDING_REPOS], [], "every opt2 repo exists; any 404 is an alarm (private repos: see PRIVATE_REPOS)");
@@ -1130,11 +1134,16 @@ test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo
   const listed = /const REPOS = \[([\s\S]*?)\]\.map/.exec(activate)?.[1] ?? "";
   const names = [...listed.matchAll(/"([a-z-]+)"/g)].map((m) => `opt2-tealbrick-${m[1]}`);
   assert.deepEqual(names, OPT2_REPOS, "ops/woodpecker-activate.ts lists the same repos as OPT2_REPOS, in the same order");
-  // the CLI ships package tarballs (kind library, no images); since C174 its ONE release-index product is `cli` (kind cli, file entry)
+  // the CLI ships package tarballs (kind library, no images); release-index products: `cli` (C174) + kind package relay/harness-* (C181)
   const products = JSON.parse(readFileSync(new URL("../registry/products.json", import.meta.url), "utf8")) as Record<string, { repo: string; kind: string }>;
   assert.deepEqual(
     Object.entries(products).filter(([, p]) => p.repo.endsWith(`/${cliRepo}`)),
-    [["cli", { repo: `Martin-Atrin/${cliRepo}`, kind: "cli" }]],
+    [
+      ["cli", { repo: `Martin-Atrin/${cliRepo}`, kind: "cli" }],
+      ["harness-claude", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
+      ["harness-eve", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
+      ["relay", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
+    ],
   );
   assert.ok(!Object.values(products).some((p) => p.repo.endsWith("/opt2-tealbrick-sdk")));
 });
@@ -1149,6 +1158,11 @@ const cliFixture = (pkgJson = cliPkg()) => {
   const sums = assetChecksums("opt2-tealbrick-cli-0.2.0.tgz", tgz);
   return { tgz, sha256File: sums.files[0]?.body ?? "", integrityFile: sums.files[1]?.body ?? "", sums };
 };
+const relayFixture = (pkgJson = JSON.stringify({ name: "@opt2-tealbrick/relay", version: "0.1.0" })) => {
+  const tgz = makeTgz({ "package.json": pkgJson, "dist/index.js": "export {};\n" });
+  const sums = assetChecksums("opt2-tealbrick-relay-0.1.0.tgz", tgz);
+  return { tgz, sha256File: sums.files[0]?.body ?? "", integrityFile: sums.files[1]?.body ?? "", sums };
+};
 const cliEntry = (over: Partial<IndexRelease> = {}): IndexRelease => {
   const f = cliFixture();
   const r = cliReleaseFromAssets({ version: "0.2.0", commit: CLI_SHA, ...f, publishedAt: "2026-10-14T00:00:00.000Z", id: "rel_01JA0000000000000000000009" });
@@ -1159,7 +1173,7 @@ const cliEntry = (over: Partial<IndexRelease> = {}): IndexRelease => {
 test("C174: cli entry shape from a fixture release (dist URL, sha256 + sha512 integrity, nothing else)", () => {
   const f = cliFixture();
   const r = cliEntry();
-  assert.deepEqual(INDEX_KINDS, ["app", "bridge", "desktop", "cli"]);
+  assert.deepEqual(INDEX_KINDS, ["app", "bridge", "desktop", "cli", "package"]);
   assert.equal(r.kind, "cli");
   assert.equal(r.product, "cli");
   assert.equal(r.channel, "stable");
@@ -1242,8 +1256,14 @@ test("C174: the signer refuses a cli tarball whose checksums or package.json do 
 });
 
 /** A fake GitHub API for the private CLI repo: records every request (URL + whether it carried the token). */
-function fakeCliGitHub(opts: { tagsStatus?: number; release?: "none" | "no-tgz" | "no-sums" | "ok"; fixture?: ReturnType<typeof cliFixture> }) {
+function fakeCliGitHub(opts: {
+  tagsStatus?: number;
+  release?: "none" | "no-tgz" | "no-sums" | "ok";
+  fixture?: ReturnType<typeof cliFixture>;
+  relay?: boolean;
+}) {
   const f = opts.fixture ?? cliFixture();
+  const rf = relayFixture();
   const calls: { url: string; auth: boolean }[] = [];
   const assets = [
     { id: 1, name: "opt2-tealbrick-cli-0.2.0.tgz", body: f.tgz },
@@ -1251,6 +1271,11 @@ function fakeCliGitHub(opts: { tagsStatus?: number; release?: "none" | "no-tgz" 
     { id: 3, name: "opt2-tealbrick-cli-0.2.0.tgz.integrity", body: Buffer.from(f.integrityFile) },
     { id: 4, name: "opt2-tealbrick-relay-0.1.0.tgz", body: Buffer.from("x") },
   ].filter((a) => (opts.release === "no-tgz" ? a.id !== 1 : opts.release === "no-sums" ? a.id !== 3 : true));
+  const relayAssets = [
+    { id: 11, name: "opt2-tealbrick-relay-0.1.0.tgz", body: rf.tgz },
+    { id: 12, name: "opt2-tealbrick-relay-0.1.0.tgz.sha256", body: Buffer.from(rf.sha256File) },
+    { id: 13, name: "opt2-tealbrick-relay-0.1.0.tgz.integrity", body: Buffer.from(rf.integrityFile) },
+  ];
   const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -1267,8 +1292,11 @@ function fakeCliGitHub(opts: { tagsStatus?: number; release?: "none" | "no-tgz" 
           ]);
     if (url === `${base}/releases/tags/cli-v0.2.0`)
       return opts.release === "none" ? json(404, {}) : json(200, { assets: assets.map(({ id, name }) => ({ id, name })) });
+    if (url === `${base}/releases/tags/relay-v0.1.0`)
+      return opts.relay ? json(200, { assets: relayAssets.map(({ id, name }) => ({ id, name })) }) : json(404, {});
+    if (url === `${base}/releases/tags/harness-claude-v0.2.0`) return json(404, {});
     const m = /\/releases\/assets\/(\d+)$/.exec(url);
-    const a = m ? assets.find((x) => x.id === Number(m[1])) : undefined;
+    const a = m ? [...assets, ...(opts.relay ? relayAssets : [])].find((x) => x.id === Number(m[1])) : undefined;
     if (a && headers.accept === "application/octet-stream") return new Response(new Uint8Array(a.body), { status: 200 });
     return json(500, { unexpected: url });
   }) as typeof fetch;
@@ -1300,7 +1328,7 @@ test("C174: cli source with the token builds the entry from a fixture release; p
   const r = await cliSourceReleases({ token: "tok", known, fetcher: gh.fetcher, now: () => "2026-10-14T00:00:00.000Z" });
   assert.equal(r.pending, null);
   assert.deepEqual(r.rejected, []);
-  assert.equal(r.add.length, 1, "only cli-v* tags; relay/harness tags are not CLI releases");
+  assert.equal(r.add.length, 1, "relay/harness tags without a release yet are pending; only the cli entry is added");
   const e = r.add[0] as IndexRelease;
   assert.equal(cliEntryProblem(e), null);
   assert.equal(e.commit, CLI_SHA);
@@ -1313,7 +1341,7 @@ test("C174: cli source with the token builds the entry from a fixture release; p
   // known version: nothing fetched beyond the tag list
   const again = fakeCliGitHub({ release: "ok" });
   assert.equal((await cliSourceReleases({ token: "tok", known, fetcher: again.fetcher })).add.length, 0);
-  assert.equal(again.calls.length, 1);
+  assert.ok(!again.calls.some((c) => c.url.includes("/releases/assets/") || c.url.endsWith("/releases/tags/cli-v0.2.0")), "known cli version: nothing fetched");
   // release not created yet, or tarball not uploaded yet: pending (no entry, no rejection)
   for (const release of ["none", "no-tgz"] as const) {
     const p = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: fakeCliGitHub({ release }).fetcher });
@@ -1462,4 +1490,56 @@ test("BSD-08: the Portal key-set statement is a registry release asset next to t
   assert.ok(pub.includes("for (const [path, name] of REGISTRY_EXTRA_ASSETS)"), "publishIndex uploads every extra asset");
   const sync = src.slice(src.indexOf("async function cmdRegistrySync"), src.indexOf("function argValue"));
   assert.ok(sync.includes("await syncRegistryExtraAssets()"), "a run with nothing new still repairs a missing/stale key file asset");
+});
+
+test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sha256 + sha512, packed name checked, bound in products.json", async () => {
+  const rf = relayFixture();
+  const base = { product: "relay", version: "0.1.0", commit: CLI_SHA, publishedAt: "2026-10-15T00:00:00.000Z", id: "rel_01JA0000000000000000000010" };
+  const e = distReleaseFromAssets({ ...base, ...rf });
+  assert.equal(typeof e, "object", String(e));
+  const r = e as IndexRelease;
+  assert.equal(r.kind, "package");
+  assert.equal(r.tag, "relay-v0.1.0");
+  assert.equal(
+    r.artifact?.url,
+    "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+  );
+  assert.equal(r.artifact?.url, distTarballUrl("relay", "0.1.0"));
+  assert.equal(distEntryProblem(r), null);
+  // fires: wrong packed name, kind mismatch, unknown product, private repo URL, missing integrity
+  const wrong = relayFixture(JSON.stringify({ name: "@opt2-tealbrick/cli", version: "0.1.0" }));
+  assert.match(String(distReleaseFromAssets({ ...base, ...wrong })), /not @opt2-tealbrick\/relay@0\.1\.0/);
+  assert.match(String(distReleaseFromAssets({ ...base, product: "bridge", ...rf })), /not a dist product/);
+  assert.match(distEntryProblem({ ...r, kind: "cli" }) ?? "", /must be kind package/);
+  assert.match(distEntryProblem({ ...r, product: "spec" }) ?? "", /not a dist product/);
+  const art = r.artifact as { url: string; sha256: string; integrity: string };
+  assert.match(
+    distEntryProblem({
+      ...r,
+      artifact: { ...art, url: "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz" },
+    }) ?? "",
+    /dist host/,
+  );
+  assert.match(
+    distEntryProblem({ ...r, artifact: { url: art.url, sha256: art.sha256 } as IndexRelease["artifact"] }) ?? "",
+    /integrity .* required for kind package/,
+  );
+  // no bin needed for a package; the cli still needs its bin
+  assert.equal(DIST_PRODUCTS.relay?.bin, undefined);
+  assert.equal(DIST_PRODUCTS.cli?.bin, "tealbrick");
+  // products.json binds every dist product to the CLI repo with its kind; mergeIndex accepts it and keeps it immutable
+  const bindings = loadProductBindings();
+  for (const [product, d] of Object.entries(DIST_PRODUCTS)) assert.deepEqual(bindings[product], { repo: `Martin-Atrin/${CLI_REPO}`, kind: d.kind }, product);
+  const i1 = mergeIndex(null, [r], [], "t", [], bindings);
+  assert.equal(i1.releases.length, 1);
+  assert.throws(
+    () => mergeIndex(i1, [{ ...r, artifact: { ...art, url: distTarballUrl("relay", "0.1.0", "https://releases.tealbrick.com") } }], [], "t"),
+    /immutable/,
+  );
+  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Martin-Atrin/opt2-tealbrick-bridge" }], [], "t", [], bindings), /GTP-01/);
+  // the source picks relay-v* releases up next to cli-v* (harness-claude without a release yet: pending)
+  const gh = fakeCliGitHub({ release: "ok", relay: true });
+  const out = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: gh.fetcher, now: () => "2026-10-15T00:00:00.000Z" });
+  assert.deepEqual(out.rejected, []);
+  assert.deepEqual(out.add.map((x) => `${x.kind}:${x.product}@${x.version}`).sort(), ["cli:cli@0.2.0", "package:relay@0.1.0"]);
 });

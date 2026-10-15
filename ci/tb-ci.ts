@@ -125,7 +125,7 @@ export interface CiConfig {
 export type Channel = "stable" | "dev";
 /** Kinds of release-index entries. C174: `cli` = the tealbrick CLI tarball the C173 installer and `tealbrick self-update` verify.
  *  Readers skip kinds they do not know (L24); Core indexes app/bridge/desktop only. */
-export const INDEX_KINDS = ["app", "bridge", "desktop", "cli"] as const;
+export const INDEX_KINDS = ["app", "bridge", "desktop", "cli", "package"] as const;
 export type IndexKind = (typeof INDEX_KINDS)[number];
 /** A downloadable release file. `sha256` is `sha256:<hex>`; `integrity` (C174, required for kind cli) is the npm/pnpm lockfile
  *  value `sha512-<base64>` of the same bytes (the `.integrity` asset, ci-v9.5). */
@@ -754,7 +754,7 @@ export interface ProductBinding {
 }
 export type ProductBindings = Record<string, ProductBinding>;
 
-/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop"|"cli" } }. */
+/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop"|"cli"|"package" } }. */
 export function validateProducts(raw: unknown): ProductBindings {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("products.json must be an object { product: { repo, kind } }");
   const out: ProductBindings = {};
@@ -803,23 +803,49 @@ export function cliTarballUrl(version: string, distBase: string = CLI_DIST_BASE)
   return releaseUrl(CLI_REPO, CLI_TAG_DIR, CLI_PACKAGE, version, distBase);
 }
 
+/** C174 + C181: the npm tarballs the private CLI repo releases onto the dist host, per index product. kind `cli` = the CLI the
+ *  installer and `tealbrick self-update` install; kind `package` = a library other repos depend on by dist URL (relay for the
+ *  private bridge and TBD; the harnesses). Release tag `<tagDir>-v<semver>`; the packed package.json must be `packageName` at that
+ *  version (and carry `bin` when set). Change by platform PR only; products.json binds each product to the CLI repo + kind. */
+export const DIST_PRODUCTS: Readonly<Record<string, { kind: "cli" | "package"; packageName: string; tagDir: string; bin?: string }>> = {
+  cli: { kind: "cli", packageName: CLI_PACKAGE, tagDir: CLI_TAG_DIR, bin: "tealbrick" },
+  relay: { kind: "package", packageName: "@opt2-tealbrick/relay", tagDir: "relay" },
+  "harness-claude": { kind: "package", packageName: "@opt2-tealbrick/harness-claude", tagDir: "harness-claude" },
+  "harness-eve": { kind: "package", packageName: "@opt2-tealbrick/harness-eve", tagDir: "harness-eve" },
+};
+
+/** The only accepted URL of a DIST_PRODUCTS tarball: `<dist base>/opt2-tealbrick-cli-<tagDir>-v<ver>/<npm pack name>`. */
+export function distTarballUrl(product: string, version: string, distBase: string = CLI_DIST_BASE): string {
+  const d = DIST_PRODUCTS[product];
+  if (!d) throw new Error(`${product} is not a dist product (DIST_PRODUCTS)`);
+  return releaseUrl(CLI_REPO, d.tagDir, d.packageName, version, distBase);
+}
+
 /** C174: what is wrong with a cli index entry (null = fine). Writers stay strict (L24): a dist-host URL that matches the version,
  *  `sha256:<hex>` + `sha512-<base64>` integrity, and nothing that belongs to other kinds. */
 export function cliEntryProblem(r: IndexRelease): string | null {
   if (r.kind !== "cli") return "not a cli entry";
+  return distEntryProblem(r);
+}
+
+/** C174/C181: what is wrong with a `cli` or `package` index entry (null = fine). */
+export function distEntryProblem(r: IndexRelease): string | null {
+  const d = DIST_PRODUCTS[r.product];
+  if (!d) return `${r.product} is not a dist product (DIST_PRODUCTS: ${Object.keys(DIST_PRODUCTS).join(", ")})`;
+  if (r.kind !== d.kind) return `${r.product} must be kind ${d.kind}, got ${r.kind}`;
   const a = r.artifact;
-  if (!a || typeof a !== "object") return "a cli release needs artifact {url, sha256, integrity}";
+  if (!a || typeof a !== "object") return `a ${r.kind} release needs artifact {url, sha256, integrity}`;
   const extra = Object.keys(a).filter((k) => !["url", "sha256", "integrity"].includes(k));
   if (extra.length) return `artifact has unknown field(s) ${extra.join(", ")}`;
   if (typeof a.url !== "string" || !DIST_BASES.some((b) => a.url.startsWith(`${b}/`)))
     return `artifact.url must be on a platform dist host (${DIST_BASES.join(", ")}), never a private GitHub URL; got ${JSON.stringify(a.url)}`;
-  if (!DIST_BASES.some((b) => a.url === cliTarballUrl(r.version, b)))
-    return `artifact.url must be <dist base>/${CLI_REPO}-${CLI_TAG_DIR}-v${r.version}/${tarballName(CLI_PACKAGE, r.version)}; got ${a.url}`;
+  if (!DIST_BASES.some((b) => a.url === distTarballUrl(r.product, r.version, b)))
+    return `artifact.url must be <dist base>/${CLI_REPO}-${d.tagDir}-v${r.version}/${tarballName(d.packageName, r.version)}; got ${a.url}`;
   if (typeof a.sha256 !== "string" || !SHA256_RE.test(a.sha256)) return "artifact.sha256 must be sha256:<64 hex>";
-  if (a.integrity === undefined) return "artifact.integrity (sha512-<base64>) is required for kind cli";
+  if (a.integrity === undefined) return `artifact.integrity (sha512-<base64>) is required for kind ${r.kind}`;
   if (typeof a.integrity !== "string" || !SHA512_INTEGRITY_RE.test(a.integrity)) return "artifact.integrity must be sha512-<88 base64 chars>";
   if (r.image || r.source || r.runtime || r.services?.length || r.manifestDigest || r.manifestUrl || r.skillsDigest)
-    return "a cli release carries only the artifact (no image, source, runtime, services or manifest)";
+    return `a ${r.kind} release carries only the artifact (no image, source, runtime, services or manifest)`;
   if (r.minOs !== null || r.notarized !== null) return "minOs/notarized are desktop fields";
   return null;
 }
@@ -827,7 +853,13 @@ export function cliEntryProblem(r: IndexRelease): string | null {
 /** C174: builds the cli entry from the release assets of tag `cli-v<version>` the signer downloaded itself. It trusts no
  *  product-written digest: it hashes the tarball, requires the `.sha256` and `.integrity` assets to agree, and requires the
  *  packed package.json to be @opt2-tealbrick/cli at this version with a `tealbrick` bin. Pure; returns the entry or a rejection. */
-export function cliReleaseFromAssets(input: {
+export function cliReleaseFromAssets(input: Omit<Parameters<typeof distReleaseFromAssets>[0], "product">): IndexRelease | string {
+  return distReleaseFromAssets({ ...input, product: CLI_PRODUCT });
+}
+
+/** C174/C181: the same rules for every DIST_PRODUCTS product (bin only where the product declares one). */
+export function distReleaseFromAssets(input: {
+  product: string;
   version: string;
   commit: string;
   tgz: Uint8Array;
@@ -837,10 +869,12 @@ export function cliReleaseFromAssets(input: {
   publishedAt: string;
   id?: string;
 }): IndexRelease | string {
-  const { version, commit, tgz } = input;
+  const { version, commit, tgz, product } = input;
+  const d = DIST_PRODUCTS[product];
+  if (!d) return `${product} is not a dist product (DIST_PRODUCTS)`;
   if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) return `bad version ${JSON.stringify(version)}`;
   if (!/^[0-9a-f]{40}$/.test(commit)) return "commit must be a full sha";
-  const name = tarballName(CLI_PACKAGE, version);
+  const name = tarballName(d.packageName, version);
   const sums = assetChecksums(name, tgz);
   const listed = input.sha256File.trim().split(/\s+/);
   if (listed[0] !== sums.sha256 || (listed[1] !== undefined && listed[1].replace(/^\*/, "") !== name))
@@ -854,20 +888,23 @@ export function cliReleaseFromAssets(input: {
   } catch (e) {
     return `${name} is not a readable npm tarball: ${(e as Error).message}`;
   }
-  if (pkg.name !== CLI_PACKAGE || pkg.version !== version) return `${name} contains ${String(pkg.name)}@${String(pkg.version)}, not ${CLI_PACKAGE}@${version}`;
-  const bin = pkg.bin as Record<string, unknown> | undefined;
-  if (!bin || typeof bin !== "object" || typeof bin.tealbrick !== "string") return `${name} has no "tealbrick" bin`;
+  if (pkg.name !== d.packageName || pkg.version !== version)
+    return `${name} contains ${String(pkg.name)}@${String(pkg.version)}, not ${d.packageName}@${version}`;
+  if (d.bin) {
+    const bin = pkg.bin as Record<string, unknown> | undefined;
+    if (!bin || typeof bin !== "object" || typeof bin[d.bin] !== "string") return `${name} has no "${d.bin}" bin`;
+  }
   const entry: IndexRelease = {
     id: input.id ?? newId("rel"),
-    product: CLI_PRODUCT,
-    kind: "cli",
+    product,
+    kind: d.kind,
     version,
-    channel: releaseChannel(CLI_PRODUCT, version),
+    channel: releaseChannel(product, version),
     manifestDigest: null,
     manifestUrl: null,
     skillsDigest: null,
     image: null,
-    artifact: { url: cliTarballUrl(version, input.distBase ?? CLI_DIST_BASE), sha256: `sha256:${sums.sha256}`, integrity: sums.integrity },
+    artifact: { url: distTarballUrl(product, version, input.distBase ?? CLI_DIST_BASE), sha256: `sha256:${sums.sha256}`, integrity: sums.integrity },
     source: null,
     runtime: null,
     services: null,
@@ -876,10 +913,10 @@ export function cliReleaseFromAssets(input: {
     upgradeFrom: "*",
     repo: `${OWNER}/${CLI_REPO}`,
     commit,
-    tag: `${CLI_TAG_DIR}-v${version}`,
+    tag: `${d.tagDir}-v${version}`,
     publishedAt: input.publishedAt,
   };
-  return cliEntryProblem(entry) ?? entry;
+  return distEntryProblem(entry) ?? entry;
 }
 
 export interface CliSourceResult {
@@ -923,12 +960,16 @@ export async function cliSourceReleases(opts: {
     return out;
   }
   const tags = (await tagsRes.json()) as { name: string; commit: { sha: string } }[];
-  const tagRe = new RegExp(`^${CLI_TAG_DIR}-v(\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?)$`);
+  // C181: every DIST_PRODUCTS tag (cli-v*, relay-v*, harness-*-v*); the longest tagDir wins (none is a prefix of another today)
+  const byDir = new Map(Object.entries(DIST_PRODUCTS).map(([product, d]) => [d.tagDir, product]));
+  const tagRe = /^([a-z0-9][a-z0-9-]*)-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
   for (const t of tags) {
     const m = tagRe.exec(t.name);
-    if (!m) continue;
-    const version = m[1] as string;
-    const key = `${CLI_PRODUCT}@${version}@${releaseChannel(CLI_PRODUCT, version)}`;
+    const product = m ? byDir.get(m[1] as string) : undefined;
+    if (!m || !product) continue;
+    const version = m[2] as string;
+    const d = DIST_PRODUCTS[product] as (typeof DIST_PRODUCTS)[string];
+    const key = `${product}@${version}@${releaseChannel(product, version)}`;
     if (opts.known.has(key)) continue;
     const where = `${CLI_REPO} ${t.name}`;
     try {
@@ -939,7 +980,7 @@ export async function cliSourceReleases(opts: {
         continue;
       }
       const assets = ((await relRes.json()) as { assets?: { id: number; name: string }[] }).assets ?? [];
-      const name = tarballName(CLI_PACKAGE, version);
+      const name = tarballName(d.packageName, version);
       const find = (n: string) => assets.find((a) => a.name === n);
       const tgzAsset = find(name);
       if (!tgzAsset) continue; // not uploaded yet: pending
@@ -955,7 +996,8 @@ export async function cliSourceReleases(opts: {
         return new Uint8Array(await r.arrayBuffer());
       };
       const text = (b: Uint8Array) => Buffer.from(b).toString("utf8");
-      const r = cliReleaseFromAssets({
+      const r = distReleaseFromAssets({
+        product,
         version,
         commit: t.commit.sha,
         tgz: await get(tgzAsset.id),
@@ -993,12 +1035,12 @@ export function mergeIndex(
     if (r.channel === "stable" && isDevOnlyProduct(r.product))
       throw new Error(`${r.product}@${r.version}: ${r.product} is dev-only (DEV_ONLY_PRODUCTS); the signer refuses a stable release`);
     if (!(INDEX_KINDS as readonly string[]).includes(r.kind)) throw new Error(`${r.product}@${r.version}: unknown kind ${JSON.stringify(r.kind)}`);
-    const fileKind = r.kind === "desktop" || r.kind === "cli"; // released as a downloadable file, not an image
+    const fileKind = r.kind === "desktop" || r.kind === "cli" || r.kind === "package"; // released as a downloadable file, not an image
     if (!fileKind && r.channel === "stable" && !r.image)
       throw new Error(`${r.product}@${r.version}: a stable release needs an image digest (source builds are dev only, C29)`);
     if (!fileKind && !r.image && !r.source) throw new Error(`${r.product}@${r.version}: needs image or source`);
-    if (r.kind === "cli") {
-      const problem = cliEntryProblem(r);
+    if (r.kind === "cli" || r.kind === "package") {
+      const problem = distEntryProblem(r);
       if (problem) throw new Error(`${r.product}@${r.version}: ${problem}`);
     }
     if ((r.kind === "bridge") !== (r.runtime !== null && r.runtime !== undefined))
@@ -1016,7 +1058,7 @@ export function mergeIndex(
         old.image !== r.image ||
         old.artifact?.sha256 !== r.artifact?.sha256 ||
         old.artifact?.integrity !== r.artifact?.integrity ||
-        (r.kind === "cli" && old.artifact?.url !== r.artifact?.url) ||
+        ((r.kind === "cli" || r.kind === "package") && old.artifact?.url !== r.artifact?.url) ||
         old.manifestDigest !== r.manifestDigest ||
         old.source?.ref !== r.source?.ref ||
         (old.source?.context ?? ".") !== (r.source?.context ?? ".")
