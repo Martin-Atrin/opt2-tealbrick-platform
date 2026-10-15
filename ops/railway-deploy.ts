@@ -1,5 +1,6 @@
 // Deploy an opt2 service in Railway project "opt2" from its GitHub repo (public, or private via the gh login, C154) at a pushed commit (C32).
-//   node ops/railway-deploy.ts --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>]
+//   node ops/railway-deploy.ts --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>] [--environment <name>]
+// - --environment: Railway environment name in project opt2 (default `production` = dev; `live` = PROD in test mode, C187).
 // - refuses a SHA that is not on GitHub (must be pushed); records the SHA in the deployment.
 // - uses the Railway CLI login of the operator (~/.railway/config.json); prints no variable values.
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const PROJECT = "15297ce5-0283-4901-a408-9c802e6ac53a"; // Railway project "opt2"
-const ENVIRONMENT = "2a09b7be-6d8e-4981-a2b1-20bc7922fca5"; // production
+const DEV_ENVIRONMENT = "2a09b7be-6d8e-4981-a2b1-20bc7922fca5"; // production (= dev)
 const OWNER = "Martin-Atrin";
 
 function arg(name: string): string | undefined {
@@ -20,6 +21,7 @@ const repo = arg("--repo");
 const sha = arg("--sha");
 const dockerfile = arg("--dockerfile");
 const root = arg("--root");
+const envName = arg("--environment") ?? "production";
 if (!service || !repo || !/^opt2-tealbrick-[a-z0-9-]+$/.test(repo) || !sha || !/^[0-9a-f]{40}$/.test(sha))
   throw new Error("usage: --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>]");
 
@@ -58,6 +60,13 @@ const proj = await gql<{ project: { services: { edges: { node: { id: string; nam
 );
 const svc = proj.project.services.edges.map((e) => e.node).find((n) => n.name === service);
 if (!svc) throw new Error(`service ${service} not in project opt2 (ask Platform to create it)`);
+const envs = await gql<{ project: { environments: { edges: { node: { id: string; name: string } }[] } } }>(
+  "query($id:String!){ project(id:$id){ environments{ edges{ node{ id name } } } } }",
+  { id: PROJECT },
+);
+const ENVIRONMENT = envs.project.environments.edges.map((e) => e.node).find((n) => n.name === envName)?.id;
+if (!ENVIRONMENT) throw new Error(`environment ${envName} not in project opt2`);
+if (envName === "production" && ENVIRONMENT !== DEV_ENVIRONMENT) throw new Error("environment production has an unexpected id; stop and check");
 
 if (dockerfile) {
   await gql("mutation($i:VariableUpsertInput!){ variableUpsert(input:$i) }", {
@@ -77,4 +86,4 @@ const dep = await gql<{ serviceInstanceDeployV2: string }>(
     c: sha,
   },
 );
-console.log(`deploy ${service} <- ${OWNER}/${repo}@${sha}${dockerfile ? ` (${dockerfile})` : ""}: deployment ${dep.serviceInstanceDeployV2}`);
+console.log(`deploy ${service} [${envName}] <- ${OWNER}/${repo}@${sha}${dockerfile ? ` (${dockerfile})` : ""}: deployment ${dep.serviceInstanceDeployV2}`);
