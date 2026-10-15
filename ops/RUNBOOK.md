@@ -59,3 +59,28 @@ Portal never connects in; the owner's bridge pulls config. Symptoms: agents get 
 
 ## 7. Close
 Status page green for 15 minutes, GlitchTip quiet, root cause written in `ops/INCIDENTS.md` (what, why, fix, follow-up), follow-up tasks filed with the owning lead.
+
+## 8. Own infrastructure bridge (C158)
+The CLI has no `bridge enrol` / `bridge run` since cli 0.2.0. An owner who runs the bridge on their own machine or server runs the public bridge-server image (the same image Core deploys; GHCR package public, the source repo is private).
+```sh
+docker run -d --name tealbrick-bridge --restart unless-stopped \
+  -v <data dir>:/data \
+  -e TB_ENROL_CODE=<tbe_ enrolment code from Portal> \
+  -e TB_PORTAL_URL=<Portal address, https> \
+  -e TB_PUBLIC_URL=<https address where agents reach this bridge> \
+  -e TB_KEK=<32 random bytes: base64url (43 chars) or hex (64 chars)> \
+  -p 8080:8080 \
+  ghcr.io/martin-atrin/opt2-tealbrick-bridge-server:<version>
+```
+- `<version>`: a bridge version from the signed release index (`kind: "bridge"`); pin it, never `latest`. Never run a `-conformance` tag (test roots on; never in the index).
+- `TB_KEK` (C35): generate once (`openssl rand -hex 32`), keep it in the owner's secret store; it seals the bridge state on the volume. Lost KEK = re-enrol with a new code. Rotation: new key as `TB_KEK`, old as `TB_KEK_PREVIOUS` for one start (BRG-05).
+- The enrolment code is used once; a restart with the same volume needs no new code. Optional: `TB_PUBLIC_HOST=127.0.0.1` behind a local TLS proxy (C171); `TB_INTERNAL_PORT` (default 8788) is the private companion listener for apps on the same host network.
+- Checks: `curl -fsS <TB_PUBLIC_URL>/healthz` (live) and `/readyz` (enrolled + config fresh); Portal shows the bridge online.
+- Coolify: same image, same env, a persistent volume on `/data`, port 8080.
+
+## 9. Private repos (C154/C173)
+Private: `opt2-tealbrick-portal-core`, `opt2-tealbrick-bridge`, `opt2-tealbrick-cli` (`PRIVATE_REPOS` in `ci/tb-ci.ts`). Public: the release index (platform), the dist repo, the GHCR bridge image, the mini apps.
+- registry-sync and the template audit read private repos ONLY with `TB_PRIVATE_READ_TOKEN` (fine-grained, read-only: Contents + Metadata on the private repos); the platform `GITHUB_TOKEN` cannot see them. A private repo it cannot read = a red registry-sync run naming the token (the other repos are still synced). The daily Woodpecker template audit has no token: it logs `SKIP` for private repos (each repo's own `setup` step enforces `ci/MIN_TEMPLATE`).
+- Release files of a private repo are public only through the dist repo (`opt2-tealbrick-dist`, pull mirror C164) and only when the signed index points at them; never link a private repo's release URL in a public repo (C154).
+- `ops/railway-deploy.ts` checks a private repo's commit through your own `gh` login; Railway builds a private repo through its GitHub app (repository access must include it).
+- Visibility is reversible (GitHub → repo → Settings → Danger Zone). A GHCR package keeps its own visibility; a public package cannot be made private again.

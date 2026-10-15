@@ -10,6 +10,7 @@ import {
   addPnpmIntegrity,
   artifactSource,
   assetChecksums,
+  auditVerdict,
   belowMinimum,
   CLI_DIST_BASE,
   CLI_REPO,
@@ -46,6 +47,7 @@ import {
   PG_DONE_MARKER,
   PG_MARKER,
   PG_TEST_URL,
+  PRIVATE_REPOS,
   packageBuildArgs,
   packageManagerPinned,
   packageReleaseCommands,
@@ -59,6 +61,8 @@ import {
   releaseChannel,
   releaseUrl,
   renderImagesScript,
+  repoReader,
+  repoReadProblem,
   resolveDistBase,
   sha512Integrity,
   skillsArchive,
@@ -1115,10 +1119,12 @@ test("ci-v9.6 template: pre-release step after gen; image-check and release-reco
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root);") < build.indexOf('"docker",'), "app tags: checks run before the image build");
 });
 
-test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list, pending until its GitHub repo exists; only registry product = cli (C174)", () => {
+test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo pending since the CLI repo exists (C177); only registry product = cli (C174)", () => {
   assert.ok(OPT2_REPOS.includes(cliRepo));
   for (const r of PENDING_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is pending but not an opt2 repo`);
-  assert.deepEqual([...PENDING_REPOS], [cliRepo], "only the CLI repo is pending; any other 404 stays an alarm");
+  assert.deepEqual([...PENDING_REPOS], [], "every opt2 repo exists; any 404 is an alarm (private repos: see PRIVATE_REPOS)");
+  for (const r of PRIVATE_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is private but not an opt2 repo`);
+  assert.deepEqual([...PRIVATE_REPOS].sort(), ["opt2-tealbrick-bridge", "opt2-tealbrick-cli", "opt2-tealbrick-portal-core"], "C154/C173");
   const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
   const listed = /const REPOS = \[([\s\S]*?)\]\.map/.exec(activate)?.[1] ?? "";
   const names = [...listed.matchAll(/"([a-z-]+)"/g)].map((m) => `opt2-tealbrick-${m[1]}`);
@@ -1277,11 +1283,11 @@ test("C174: cli source without the read token is PENDING (green, no entry, no ne
     assert.match(r.pending ?? "", /TB_PRIVATE_READ_TOKEN/);
   }
   assert.equal(gh.calls.length, 0);
-  // token present but the repo is not visible yet (PENDING_REPOS): still pending, not an alarm
-  assert.ok(PENDING_REPOS.includes(CLI_REPO));
+  // token present but it cannot see the (existing, private) repo: an alarm, no longer pending (C177: the repo exists)
+  assert.ok(!PENDING_REPOS.includes(CLI_REPO));
   const hidden = await cliSourceReleases({ token: "t", known: new Set(), fetcher: fakeCliGitHub({ tagsStatus: 404 }).fetcher });
-  assert.match(hidden.pending ?? "", /PENDING_REPOS/);
-  assert.deepEqual(hidden.rejected, []);
+  assert.equal(hidden.pending, null);
+  assert.match(hidden.rejected.join(), /HTTP 404/);
   // a refused token is an alarm (registry-sync fails loudly)
   const refused = await cliSourceReleases({ token: "t", known: new Set(), fetcher: fakeCliGitHub({ tagsStatus: 401 }).fetcher });
   assert.match(refused.rejected.join(), /HTTP 401/);
@@ -1382,4 +1388,61 @@ test("ci-v9.7 packScripts: the output guard (exactly the named tarball, right pa
     packScriptOutputProblems(files({ "opt2-tealbrick-cli-0.2.0.tgz": Buffer.from("nope") }), "@opt2-tealbrick/cli", "0.2.0").join(),
     /not a readable/,
   );
+});
+
+test("C154: private repos are read with TB_PRIVATE_READ_TOKEN only; public repos and the platform token unchanged", async () => {
+  const calls: { url: string; auth: string | undefined; accept: string | undefined }[] = [];
+  const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+    const h = (init?.headers ?? {}) as Record<string, string>;
+    calls.push({ url: String(input), auth: h.authorization, accept: h.accept });
+    return new Response("[]", { status: 200 });
+  }) as typeof fetch;
+  const env = { GITHUB_TOKEN: "platform", TB_PRIVATE_READ_TOKEN: "readonly" } as NodeJS.ProcessEnv;
+  for (const repo of PRIVATE_REPOS) {
+    const rd = repoReader(repo, env, fetcher);
+    assert.equal(rd.via, "read-token");
+    await rd.api(`/repos/Martin-Atrin/${repo}/tags?per_page=50`);
+    await rd.file("packages/bridge-server/bridge-runtime.json", "f".repeat(40));
+  }
+  for (const c of calls) {
+    assert.equal(c.auth, "Bearer readonly", "a private repo never gets the platform GITHUB_TOKEN");
+    assert.ok(c.url.startsWith("https://api.github.com/repos/Martin-Atrin/"), "the read token goes to api.github.com only");
+  }
+  assert.ok(calls.some((c) => c.url.includes("/contents/packages/bridge-server/bridge-runtime.json?ref=") && c.accept === "application/vnd.github.raw+json"));
+  calls.length = 0;
+  const pub = repoReader("opt2-tealbrick-knowledge", env, fetcher);
+  assert.equal(pub.via, "github-token");
+  await pub.api("/repos/Martin-Atrin/opt2-tealbrick-knowledge/tags?per_page=50");
+  await pub.file("tealbrick-ci.json", "main");
+  assert.equal(calls[0]?.auth, "Bearer platform", "public repos: REST with GITHUB_TOKEN as before");
+  assert.deepEqual(calls[1], {
+    url: "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/main/tealbrick-ci.json",
+    auth: undefined,
+    accept: undefined,
+  });
+  assert.ok(!calls.some((c) => c.auth === "Bearer readonly"), "the read token never goes to a public repo");
+  // private repo without the read token: read as before (works while it is still public)
+  assert.equal(repoReader("opt2-tealbrick-bridge", { GITHUB_TOKEN: "platform" } as NodeJS.ProcessEnv, fetcher).via, "github-token");
+  assert.equal(repoReader("opt2-tealbrick-bridge", {} as NodeJS.ProcessEnv, fetcher).via, "anonymous");
+});
+
+test("C154: an unreadable private repo is a loud registry-sync rejection naming the token; the audit skips it only without the token", () => {
+  assert.match(
+    repoReadProblem("opt2-tealbrick-bridge", "list tags", 404, "github-token"),
+    /private repo: set TB_PRIVATE_READ_TOKEN with Contents \+ Metadata: read/,
+  );
+  assert.match(repoReadProblem("opt2-tealbrick-portal-core", "list tags", 404, "read-token"), /cannot read opt2-tealbrick-portal-core/);
+  assert.equal(repoReadProblem("opt2-tealbrick-knowledge", "list tags", 500, "github-token"), "opt2-tealbrick-knowledge: list tags: HTTP 500");
+  // L34 both ways: SKIP fires only for a private repo + 404 + no read token; everything else that is unreadable FAILs
+  assert.equal(auditVerdict("opt2-tealbrick-bridge", 404, "anonymous", "none", "ci-v7"), "SKIP");
+  assert.equal(auditVerdict("opt2-tealbrick-bridge", 404, "read-token", "none", "ci-v7"), "FAIL");
+  assert.equal(auditVerdict("opt2-tealbrick-knowledge", 404, "anonymous", "none", "ci-v7"), "FAIL");
+  assert.equal(auditVerdict("opt2-tealbrick-bridge", 200, "read-token", "ci-v9.5", "ci-v7"), "OK");
+  assert.equal(auditVerdict("opt2-tealbrick-bridge", 200, "anonymous", "ci-v6", "ci-v7"), "FAIL");
+  // registry-sync source: a non-200 tag list is a rejection, never iterated (a 404 body is an object, not a list)
+  const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const sync = src.slice(src.indexOf("async function cmdRegistrySync"), src.indexOf("function argValue"));
+  assert.ok(sync.includes("const rd = repoReader(repo)"), "registry-sync reads each repo through repoReader");
+  assert.ok(sync.includes("!Array.isArray(tags.json)"), "a non-list tag answer is rejected, not iterated");
+  assert.ok(!/gh\("GET", `\/repos\/\$\{OWNER\}\/\$\{repo\}\/tags/.test(sync), "no GITHUB_TOKEN tag listing of opt2 repos");
 });

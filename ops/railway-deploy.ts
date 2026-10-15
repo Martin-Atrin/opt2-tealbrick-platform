@@ -1,7 +1,8 @@
-// Deploy an opt2 service in Railway project "opt2" from its PUBLIC GitHub repo at a pushed commit (C32).
+// Deploy an opt2 service in Railway project "opt2" from its GitHub repo (public, or private via the gh login, C154) at a pushed commit (C32).
 //   node ops/railway-deploy.ts --service <name> --repo opt2-tealbrick-<x> --sha <40-hex> [--dockerfile <path>] [--root <dir>]
 // - refuses a SHA that is not on GitHub (must be pushed); records the SHA in the deployment.
 // - uses the Railway CLI login of the operator (~/.railway/config.json); prints no variable values.
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -37,11 +38,18 @@ async function gql<T>(query: string, variables: Record<string, unknown>): Promis
   return body.data as T;
 }
 
+// C154: portal-core becomes private. An anonymous check sees only public repos; for a private repo the check runs through the
+// operator's own `gh` login (the token stays inside gh, nothing is printed). Railway itself builds a private repo through its
+// GitHub app, which must have access to that repo.
+function ghSees(apiPath: string): boolean {
+  return spawnSync("gh", ["api", "--silent", apiPath], { stdio: "ignore" }).status === 0;
+}
 const commit = await fetch(`https://api.github.com/repos/${OWNER}/${repo}/commits/${sha}`, { headers: { accept: "application/vnd.github+json" } });
-if (!commit.ok) throw new Error(`${repo}@${sha} is not on GitHub (HTTP ${commit.status}); push it first`);
+if (!commit.ok && !ghSees(`repos/${OWNER}/${repo}/commits/${sha}`))
+  throw new Error(`${repo}@${sha} is not on GitHub (HTTP ${commit.status}, also not visible to your gh login); push it first`);
 if (dockerfile) {
   const df = await fetch(`https://raw.githubusercontent.com/${OWNER}/${repo}/${sha}/${dockerfile}`);
-  if (!df.ok) throw new Error(`${dockerfile} not found at ${repo}@${sha}`);
+  if (!df.ok && !ghSees(`repos/${OWNER}/${repo}/contents/${dockerfile}?ref=${sha}`)) throw new Error(`${dockerfile} not found at ${repo}@${sha}`);
 }
 
 const proj = await gql<{ project: { services: { edges: { node: { id: string; name: string } }[] } } }>(

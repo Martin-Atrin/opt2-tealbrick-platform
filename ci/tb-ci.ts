@@ -68,9 +68,15 @@ export const OPT2_REPOS = [
   "evolution",
   "cli",
 ].map((n) => `opt2-tealbrick-${n}`);
-/** Repos in OPT2_REPOS whose GitHub repo does not exist yet (opt2-tealbrick-cli is local only, C158/C159). The template audit and
- *  registry-sync skip a 404 for these and ONLY these; a 404 for any other repo stays an alarm. Remove the entry when the repo is pushed. */
-export const PENDING_REPOS: readonly string[] = ["opt2-tealbrick-cli"];
+/** Repos in OPT2_REPOS whose GitHub repo does not exist yet. The template audit and registry-sync skip a 404 for these and ONLY
+ *  these; a 404 for any other repo stays an alarm. Empty since 2026-10-15: opt2-tealbrick-cli exists (private, C173/C177). */
+export const PENDING_REPOS: readonly string[] = [];
+/** C154/C173 (2026-10-15): repos that are private or become private (Portal Core, bridge server, CLI). registry-sync and the
+ *  template audit read them with TB_PRIVATE_READ_TOKEN (fine-grained, read-only: Contents + Metadata on these repos), never
+ *  with the platform GITHUB_TOKEN, which cannot see another private repo. Without that token they are read as before
+ *  (GITHUB_TOKEN / anonymous), which works only while the repo is still public; after the flip an unreadable repo is a loud
+ *  registry-sync rejection, never a silent skip. Change by platform PR only. */
+export const PRIVATE_REPOS: readonly string[] = ["opt2-tealbrick-portal-core", "opt2-tealbrick-bridge", "opt2-tealbrick-cli"];
 /** ci-v9.6 (C154/C157): public download hosts for the release assets of private repos. A repo opts in with `distBaseUrl` in
  *  tealbrick-ci.json (or TB_DIST_BASE_URL); only these bases are accepted, so a config can never point dependencies at another host.
  *  The asset layout under a base is `<base>/<repo>-<release tag>/<file>` (one path segment, so a GitHub dist repo's release tag and a
@@ -1612,15 +1618,15 @@ async function cmdAuditTemplates(): Promise<void> {
   const min = (await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/main/${MIN_TEMPLATE_PATH}`)).trim();
   const bad: string[] = [];
   for (const repo of OPT2_REPOS) {
-    const res = await fetch(`https://raw.githubusercontent.com/${OWNER}/${repo}/main/.woodpecker/ci.yaml`);
-    if (res.status === 404 && PENDING_REPOS.includes(repo)) {
-      log(`PEND ${repo}: no GitHub repo yet (PENDING_REPOS); skipped`);
-      continue;
-    }
-    const ref = res.ok ? (/TB_CI_REF: (\S+)/.exec(await res.text())?.[1] ?? "none") : "none";
-    const ok = !belowMinimum(ref, min);
-    log(`${ok ? "OK  " : "FAIL"} ${repo}: ${ref}`);
-    if (!ok) bad.push(`${repo} (${ref})`);
+    const rd = repoReader(repo); // C154: private repos with TB_PRIVATE_READ_TOKEN when this runner has it
+    const res = await rd.file(".woodpecker/ci.yaml", "main");
+    const ref = res.text !== null ? (/TB_CI_REF: (\S+)/.exec(res.text)?.[1] ?? "none") : "none";
+    const verdict = auditVerdict(repo, res.status, rd.via, ref, min);
+    if (verdict === "PEND") log(`PEND ${repo}: no GitHub repo yet (PENDING_REPOS); skipped`);
+    else if (verdict === "SKIP")
+      log(`SKIP ${repo}: private and no ${PRIVATE_READ_TOKEN_ENV} on this runner; its own pipeline setup step enforces ${MIN_TEMPLATE_PATH}`);
+    else log(`${verdict === "OK" ? "OK  " : "FAIL"} ${repo}: ${res.status === 200 ? ref : `HTTP ${res.status}`}`);
+    if (verdict === "FAIL") bad.push(`${repo} (${res.status === 200 ? ref : `HTTP ${res.status}`})`);
   }
   if (bad.length) fail(`below minimum ${min}: ${bad.join(", ")}`);
   log(`all ${OPT2_REPOS.length} repos at or above ${min}`);
@@ -2112,19 +2118,84 @@ export async function verifyImageProvenance(ref: string, repo: string, commit: s
   return null;
 }
 
-async function rawAt(repo: string, commit: string, path: string): Promise<string> {
-  const r = await fetch(`https://raw.githubusercontent.com/${repo}/${commit}/${path}`);
-  if (!r.ok) throw new Error(`${path} not found at ${repo}@${commit} (HTTP ${r.status})`);
-  return r.text();
+/** C154 private-repo reads: how registry-sync and the template audit read one opt2 repo. */
+export interface RepoReader {
+  /** read-token = TB_PRIVATE_READ_TOKEN (PRIVATE_REPOS only), github-token = the platform GITHUB_TOKEN, anonymous = no token */
+  via: "read-token" | "github-token" | "anonymous";
+  api(path: string): Promise<{ status: number; json: any }>;
+  /** one file of this repo at a ref; text null when the status is not 200 */
+  file(path: string, ref: string): Promise<{ status: number; text: string | null }>;
+}
+
+/** The reader for one repo. A repo in PRIVATE_REPOS uses TB_PRIVATE_READ_TOKEN when it is set (api.github.com only: REST +
+ *  contents API with the raw media type); every other repo, or a private one without that token, is read as before (REST with
+ *  GITHUB_TOKEN, files from the anonymous raw host, so public repos cost no API quota). The read token never goes to another repo. */
+export function repoReader(repo: string, env: NodeJS.ProcessEnv = process.env, fetcher: typeof fetch = fetch): RepoReader {
+  const readToken = PRIVATE_REPOS.includes(repo) ? env[PRIVATE_READ_TOKEN_ENV] || undefined : undefined;
+  const token = readToken ?? (env.GITHUB_TOKEN || undefined);
+  const via: RepoReader["via"] = readToken ? "read-token" : token ? "github-token" : "anonymous";
+  const headers = (accept: string): Record<string, string> => ({
+    accept,
+    "x-github-api-version": "2022-11-28",
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+  });
+  return {
+    via,
+    async api(path) {
+      const res = await fetcher(`https://api.github.com${path}`, { headers: headers("application/vnd.github+json") });
+      const text = await res.text();
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = text;
+      }
+      return { status: res.status, json };
+    },
+    async file(path, ref) {
+      const res = readToken
+        ? await fetcher(
+            `https://api.github.com/repos/${OWNER}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
+            { headers: headers("application/vnd.github.raw+json") },
+          )
+        : await fetcher(`https://raw.githubusercontent.com/${OWNER}/${repo}/${ref}/${path}`);
+      return { status: res.status, text: res.ok ? await res.text() : null };
+    },
+  };
+}
+
+/** One line for a repo that could not be read; names the missing or too narrow read token for PRIVATE_REPOS. */
+export function repoReadProblem(repo: string, what: string, status: number, via: RepoReader["via"]): string {
+  const hint = !PRIVATE_REPOS.includes(repo)
+    ? ""
+    : via === "read-token"
+      ? ` (${PRIVATE_READ_TOKEN_ENV} cannot read ${repo}: it needs Contents + Metadata: read on it)`
+      : ` (${repo} is a private repo: set ${PRIVATE_READ_TOKEN_ENV} with Contents + Metadata: read on it)`;
+  return `${repo}: ${what}: HTTP ${status}${hint}`;
+}
+
+/** D1/C56 audit verdict for one repo. SKIP only for a PRIVATE repo that answers 404 to a reader without the read token (its own
+ *  pipeline `setup` step still enforces ci/MIN_TEMPLATE); PEND only for PENDING_REPOS; any other unreadable repo FAILs. */
+export function auditVerdict(repo: string, status: number, via: RepoReader["via"], ref: string, min: string): "OK" | "FAIL" | "PEND" | "SKIP" {
+  if (status === 404 && PENDING_REPOS.includes(repo)) return "PEND";
+  if (status === 404 && PRIVATE_REPOS.includes(repo) && via !== "read-token") return "SKIP";
+  if (status !== 200) return "FAIL";
+  return belowMinimum(ref, min) ? "FAIL" : "OK";
+}
+
+async function fileAt(rd: RepoReader, repo: string, commit: string, path: string): Promise<string> {
+  const r = await rd.file(path, commit);
+  if (r.text === null) throw new Error(`${path} not found at ${repo}@${commit} (HTTP ${r.status})`);
+  return r.text;
 }
 
 /** Re-derives one index entry from the repo at the tag commit + the registry; returns the entry or a rejection. */
-async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: ReleaseCandidate): Promise<IndexRelease | string> {
+async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: ReleaseCandidate, rd: RepoReader): Promise<IndexRelease | string> {
   try {
-    const ref = await gh("GET", `/repos/${doc.repo}/git/ref/tags/${encodeURIComponent(doc.tag)}`);
+    const ref = await rd.api(`/repos/${doc.repo}/git/ref/tags/${encodeURIComponent(doc.tag)}`);
     if (ref.status !== 200) return `tag ${doc.tag} not found`;
     let sha = ref.json.object.sha as string;
-    if (ref.json.object.type === "tag") sha = (await gh("GET", `/repos/${doc.repo}/git/tags/${sha}`)).json.object.sha;
+    if (ref.json.object.type === "tag") sha = (await rd.api(`/repos/${doc.repo}/git/tags/${sha}`)).json.object.sha;
     if (sha !== doc.commit) return `tag ${doc.tag} points to ${sha}, candidate says ${doc.commit}`;
     if (versionFromTag(doc.tag) !== c.version) return `version ${c.version} != tag ${doc.tag}`;
     let manifestDigest: string | null = null;
@@ -2133,7 +2204,7 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
     let declaredServices: string[] = [];
     if (c.kind === "app") {
       if (!c.manifest || !safeRel(c.manifest)) return "app candidate without a safe manifest path";
-      const v = m.validateManifest(JSON.parse(await rawAt(doc.repo, doc.commit, c.manifest)));
+      const v = m.validateManifest(JSON.parse(await fileAt(rd, doc.repo, doc.commit, c.manifest)));
       if (!v.ok) return `manifest invalid at ${doc.commit}`;
       const man = v.manifest as {
         id?: string;
@@ -2146,7 +2217,7 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
       manifestUrl = `https://raw.githubusercontent.com/${doc.repo}/${doc.commit}/${c.manifest}`;
       const base = c.manifest.includes("/") ? c.manifest.slice(0, c.manifest.lastIndexOf("/") + 1) : "";
       const files = new Map<string, string>();
-      for (const sk of man.skills ?? []) files.set(sk.file, await rawAt(doc.repo, doc.commit, base + sk.file));
+      for (const sk of man.skills ?? []) files.set(sk.file, await fileAt(rd, doc.repo, doc.commit, base + sk.file));
       skillsDigest = m.digest(skillsArchive(man, (f) => files.get(f) ?? ""));
       declaredServices = (man.runtime?.services ?? [])
         .filter((x) => x.build)
@@ -2158,7 +2229,7 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
     let runtime: BridgeRuntime | null = null;
     if (c.kind === "bridge") {
       if (!c.runtimeFile || !safeRel(c.runtimeFile)) return "bridge candidate without a safe runtime file path";
-      runtime = validateBridgeRuntime(JSON.parse(await rawAt(doc.repo, doc.commit, c.runtimeFile)));
+      runtime = validateBridgeRuntime(JSON.parse(await fileAt(rd, doc.repo, doc.commit, c.runtimeFile)));
     }
     for (const img of [c.image, ...c.services.map((x) => x.image)]) {
       const problem = await verifyImageProvenance(img, doc.repo, doc.commit);
@@ -2206,9 +2277,9 @@ export async function ghcrDigest(name: string, tag: string, fetcher: typeof fetc
 }
 
 /** Builds the candidate for one product tag from the repo at that commit + ghcr; null = images not published (pending). */
-async function candidateFromTag(repo: string, tag: string, commit: string): Promise<ReleaseCandidateDoc | null> {
+async function candidateFromTag(repo: string, tag: string, commit: string, rd: RepoReader): Promise<ReleaseCandidateDoc | null> {
   const version = versionFromTag(tag);
-  const cfgText = await rawAt(`${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
+  const cfgText = await fileAt(rd, `${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
   if (!cfgText) return null;
   let cfg: CiConfig;
   try {
@@ -2252,17 +2323,22 @@ async function cmdRegistrySync(): Promise<void> {
   const bindings = loadProductBindings();
   for (const repo of OPT2_REPOS) {
     if (repo === CLI_REPO) continue; // C174: private; read below by the cli source with the read-only token, never with GITHUB_TOKEN
-    const tags = await gh("GET", `/repos/${OWNER}/${repo}/tags?per_page=50`);
+    const rd = repoReader(repo); // C154: PRIVATE_REPOS are read with TB_PRIVATE_READ_TOKEN, never with GITHUB_TOKEN
+    const tags = await rd.api(`/repos/${OWNER}/${repo}/tags?per_page=50`);
     if (tags.status === 404 && PENDING_REPOS.includes(repo)) {
       log(`registry-sync: ${repo} has no GitHub repo yet (PENDING_REPOS); skipped`);
       continue;
     }
-    for (const t of (tags.json ?? []) as { name: string; commit: { sha: string } }[]) {
+    if (tags.status !== 200 || !Array.isArray(tags.json)) {
+      rejected.push(repoReadProblem(repo, "list tags", tags.status, rd.via)); // loud, and the other repos are still synced
+      continue;
+    }
+    for (const t of tags.json as { name: string; commit: { sha: string } }[]) {
       if (!/^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(t.name)) continue;
       const version = t.name.slice(1);
       let doc: ReleaseCandidateDoc | null;
       try {
-        doc = await candidateFromTag(repo, t.name, t.commit.sha);
+        doc = await candidateFromTag(repo, t.name, t.commit.sha, rd);
       } catch (e) {
         rejected.push(`${repo} ${t.name}: ${(e as Error).message}`);
         continue;
@@ -2276,7 +2352,7 @@ async function cmdRegistrySync(): Promise<void> {
           rejected.push(`${repo} ${doc.tag} ${c.product}: ${bound}`);
           continue;
         }
-        const r = await verifyCandidate(m, doc, c);
+        const r = await verifyCandidate(m, doc, c, rd);
         if (typeof r === "string") rejected.push(`${repo} ${doc.tag} ${c.product}: ${r}`);
         else {
           add.push(r);
