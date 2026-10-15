@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { PRIVATE_REPOS } from "../ci/tb-ci.ts";
 
 const OWNER = "Martin-Atrin";
 const REPOS = [
@@ -28,7 +29,7 @@ const REPOS = [
   "inbox",
   "fleet",
   "evolution",
-  "cli", // C158: local only until Martin creates the GitHub repo; do not run this script before that (githubId() would fail)
+  "cli", // C173/C177: private repo (exists since 2026-10-15)
 ].map((n) => `opt2-tealbrick-${n}`);
 const CFG = join(homedir(), ".config/opt2-tealbrick");
 
@@ -74,8 +75,11 @@ for (const repo of REPOS) {
   } else {
     console.log(`${repo}: already active (id ${id})`);
   }
-  // Fork PRs need approval; no trusted/privileged settings.
-  await wp("PATCH", `/repos/${id}`, { require_approval: "forks", visibility: "public", timeout: 60 });
+  // Fork PRs need approval; no trusted/privileged settings. C154: a private GitHub repo gets private Woodpecker visibility
+  // (pipeline logs of proprietary code only for users with repo access); every other repo stays public.
+  const visibility = PRIVATE_REPOS.includes(repo) ? "private" : "public";
+  const patched = await wp("PATCH", `/repos/${id}`, { require_approval: "forks", visibility, timeout: 60 });
+  console.log(`${repo}: settings ${patched.status === 200 ? "ok" : `FAILED (HTTP ${patched.status})`} (visibility ${visibility})`);
 }
 
 // ---- Secrets (C67): NO org-level or global secrets. Each secret lives only on the repos that need it, for the

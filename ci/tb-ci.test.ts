@@ -1445,4 +1445,7 @@ test("C154: an unreadable private repo is a loud registry-sync rejection naming 
   assert.ok(sync.includes("const rd = repoReader(repo)"), "registry-sync reads each repo through repoReader");
   assert.ok(sync.includes("!Array.isArray(tags.json)"), "a non-list tag answer is rejected, not iterated");
   assert.ok(!/gh\("GET", `\/repos\/\$\{OWNER\}\/\$\{repo\}\/tags/.test(sync), "no GITHUB_TOKEN tag listing of opt2 repos");
+  const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
+  assert.ok(activate.includes('PRIVATE_REPOS.includes(repo) ? "private" : "public"'), "Woodpecker visibility follows PRIVATE_REPOS");
+  assert.ok(!activate.includes('visibility: "public"'), "no repo is forced public in Woodpecker");
 });
