@@ -58,6 +58,7 @@ import {
   parsePreReleaseChecks,
   preReleaseEnv,
   productBindingProblem,
+  REGISTRY_EXTRA_ASSETS,
   releaseChannel,
   releaseUrl,
   renderImagesScript,
@@ -1448,4 +1449,17 @@ test("C154: an unreadable private repo is a loud registry-sync rejection naming 
   const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
   assert.ok(activate.includes('PRIVATE_REPOS.includes(repo) ? "private" : "public"'), "Woodpecker visibility follows PRIVATE_REPOS");
   assert.ok(!activate.includes('visibility: "public"'), "no repo is forced public in Woodpecker");
+});
+
+test("BSD-08: the Portal key-set statement is a registry release asset next to the index (Core's default PORTAL_KEYSET_URL)", () => {
+  assert.deepEqual(
+    REGISTRY_EXTRA_ASSETS.map(([, n]) => n),
+    ["keys.json", "portal-keyset.jws"],
+  );
+  for (const [path] of REGISTRY_EXTRA_ASSETS) assert.ok(existsSync(new URL(`../${path}`, import.meta.url)), `${path} exists`);
+  const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const pub = src.slice(src.indexOf("async function publishIndex"), src.indexOf("export interface ReleaseCandidate"));
+  assert.ok(pub.includes("for (const [path, name] of REGISTRY_EXTRA_ASSETS)"), "publishIndex uploads every extra asset");
+  const sync = src.slice(src.indexOf("async function cmdRegistrySync"), src.indexOf("function argValue"));
+  assert.ok(sync.includes("await syncRegistryExtraAssets()"), "a run with nothing new still repairs a missing/stale key file asset");
 });

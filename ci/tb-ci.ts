@@ -40,6 +40,13 @@ export const HARNESSES_PATH = "registry/harnesses.json";
 /** GTP-01: the reviewed product → {repo, kind} binding the signer enforces (change by platform PR only). */
 export const PRODUCTS_PATH = "registry/products.json";
 export const REGISTRY_RELEASE_TAG = "registry";
+/** Public files that travel with the index as `registry` release assets ([repo path, asset name]): the release-key set
+ *  (D12/C30) and the root-signed Portal key-set statement (BSD-08). Core reads the statement from PORTAL_KEYSET_URL or, by
+ *  default, `portal-keyset.jws` next to RELEASE_INDEX_URL; before 2026-10-15 only the raw `main` copy existed (asset 404). */
+export const REGISTRY_EXTRA_ASSETS: readonly (readonly [string, string])[] = [
+  ["registry/keys.json", "keys.json"],
+  ["registry/portal-keyset.jws", "portal-keyset.jws"],
+];
 export const INDEX_SCHEMA = "opt2.release-index/v2";
 export const INDEX_TYP = "tb-release-index+jws";
 export const INDEX_ISS = "tb:releases";
@@ -1984,9 +1991,11 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       const rel = await ensureRelease(PLATFORM_REPO, REGISTRY_RELEASE_TAG, false, nc.json.sha as string);
       await uploadAsset(PLATFORM_REPO, rel, "index.json", body);
       if (jws) await uploadAsset(PLATFORM_REPO, rel, "index.jws", jws);
-      // D12/C30: the public verification key set travels with the index.
-      const keysText = await ghFile("registry/keys.json", nc.json.sha as string);
-      if (keysText) await uploadAsset(PLATFORM_REPO, rel, "keys.json", keysText);
+      // D12/C30 + BSD-08: the public key files travel with the index.
+      for (const [path, name] of REGISTRY_EXTRA_ASSETS) {
+        const text = await ghFile(path, nc.json.sha as string);
+        if (text) await uploadAsset(PLATFORM_REPO, rel, name, text);
+      }
       log(`${msg}; published https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${jws ? "index.jws" : "index.json"}`);
       return;
     }
@@ -2383,8 +2392,26 @@ async function cmdRegistrySync(): Promise<void> {
   const expiring = exp - Date.now() / 1000 < 30 * 86400;
   const devOnlyChanged = normalizeDevOnly(index?.releases ?? []).notes.length > 0; // C113: mark/re-classify existing records
   if (add.length || offersChanged || harnessesChanged || expiring || devOnlyChanged) await publishIndex(m, add);
-  else log("registry-sync: nothing new");
+  else {
+    log("registry-sync: nothing new");
+    await syncRegistryExtraAssets(); // a key file changed on main without an index change (e.g. a new key-set statement)
+  }
   if (rejected.length) fail(`rejected candidates:\n  - ${rejected.join("\n  - ")}`);
+}
+
+/** Keeps each REGISTRY_EXTRA_ASSETS release asset byte-equal to its file on main (uploads only on a difference). */
+async function syncRegistryExtraAssets(): Promise<void> {
+  const rel = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/releases/tags/${REGISTRY_RELEASE_TAG}`);
+  if (rel.status !== 200) return; // no registry release yet: the first publishIndex creates it with every asset
+  for (const [path, name] of REGISTRY_EXTRA_ASSETS) {
+    const want = await ghFile(path, "main");
+    if (want === null) continue;
+    const res = await fetch(`https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${name}`, { redirect: "follow" });
+    const have = res.ok ? await res.text() : null;
+    if (have === want) continue;
+    await uploadAsset(PLATFORM_REPO, rel.json.id as number, name, want);
+    log(`registry-sync: release asset ${name} updated from ${path} on main`);
+  }
 }
 
 function argValue(args: string[], name: string): string | undefined {
