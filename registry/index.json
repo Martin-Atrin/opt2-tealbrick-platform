@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-15T09:23:44.815Z",
+  "generatedAt": "2026-10-15T10:13:40.090Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -4169,6 +4169,45 @@
       "commit": "de61e92d6bbc25cf2be7e872d8497173963b61cd",
       "tag": "v0.1.19",
       "publishedAt": "2026-10-14T09:34:30.726Z"
+    },
+    {
+      "id": "rel_01M4ZGSEH47VQCMXY6CVJ00J27",
+      "product": "knowledge",
+      "kind": "app",
+      "version": "0.1.20",
+      "channel": "stable",
+      "manifestDigest": "sha256:9e38778f5271446e8f8d5cdd6f2ba5e552f68d5571488c7862f7b4f66371ed5d",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/80016de7e072e4965ec833adf5412905200014a4/tealbrick.manifest.json",
+      "skillsDigest": "sha256:fd1df5fa304bed11d7674033a93bc80343ac68a2b016a1bdbceef82b41a89978",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge@sha256:b8f5d93f049e2f3e2e5a894ea5c40deaccf3a9265fc4921e7f85ff5e3e2edce2",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [
+        {
+          "id": "gbrain",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-gbrain@sha256:58adee88dc9a0e2150b4865054aba6fe8f5739eb15d88fc7936215f4d3a152e9"
+        },
+        {
+          "id": "gbrain-db",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-gbrain-db@sha256:9e6ab6b0723508869bb602f96719612c9859156f2e7ce64820b505e0bbcbd67a"
+        },
+        {
+          "id": "notebook",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-notebook@sha256:5c863c364248688624690aa7c3355d55d7f7a63cb9e272c11973f0b118675cab"
+        },
+        {
+          "id": "notebook-db",
+          "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge-notebook-db@sha256:74b7138652c73ff7d954696471afd4507eb7993c5b1cfe7d0c7d2c430f9ad31b"
+        }
+      ],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-knowledge",
+      "commit": "80016de7e072e4965ec833adf5412905200014a4",
+      "tag": "v0.1.20",
+      "publishedAt": "2026-10-15T10:12:41.124Z"
     },
     {
       "id": "rel_01M4QYD00KZPTQHX511A1G099X",
