@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-14T09:50:41.342Z",
+  "generatedAt": "2026-10-15T08:32:00.258Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -2855,6 +2855,28 @@
       "commit": "eaceeece025b348ad89da0ccdf959f3b9271a1d8",
       "tag": "v0.1.9",
       "publishedAt": "2026-10-14T09:43:26.239Z"
+    },
+    {
+      "id": "rel_01M4ZB0SDHA2ZF1XQNMWVKK1VG",
+      "product": "fleet",
+      "kind": "app",
+      "version": "0.1.10",
+      "channel": "stable",
+      "manifestDigest": "sha256:d4d089d6bfbf8e1ffcad8418aea9bb5eb8e83569deb8a9360d965685cd708f09",
+      "manifestUrl": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-fleet/35acbb52447f922ce5b7d638af08967d0ba81de8/tealbrick.manifest.json",
+      "skillsDigest": "sha256:200d262a1c5dd91a9d1728bb98850705609ab04228178c5cc0844cd0935fbe08",
+      "image": "ghcr.io/martin-atrin/opt2-tealbrick-fleet@sha256:3440e9d8d9f1c84a6d3898c9c3a72e7087858df37b7c47b2a73144d69b1206de",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Martin-Atrin/opt2-tealbrick-fleet",
+      "commit": "35acbb52447f922ce5b7d638af08967d0ba81de8",
+      "tag": "v0.1.10",
+      "publishedAt": "2026-10-15T08:31:50.193Z"
     },
     {
       "id": "rel_01M4QYHWDR92AEA23MEZET9G0K",
