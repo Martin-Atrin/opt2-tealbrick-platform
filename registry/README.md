@@ -73,3 +73,19 @@ Rotation: add the new public key to `keys.json`, re-sign with the new key, then 
 - The dev private keys exist ONLY on the Platform operator machine (`~/.config/opt2-tealbrick/portal-root-{a,b}.key`, 0600), never on Railway, Core, CI or in a repo, never printed. Generated with `node ops/root-key.ts generate --channel dev --no-passphrase`.
 - Production roots (`portal-root-keys.stable.json`) do not exist yet: they are generated at cutover in the offline ceremony with Martin (`ops/root-key.ts generate --channel stable`, passphrase per key, separate custody; leads/specs/BSD-08-DESIGN.md "Operations").
 - The root-signed key-set statement (`portal-keyset.jws`, typ `tb-keyset+jws`) is added once Specs ships the typ in `@opt2-tealbrick/manifest`.
+
+## Release guard and channels (C207 E1 + E4)
+- **Release guard (E1).** registry-sync indexes a tag only if its commit is on `main` (or a `hotfix/*` branch), has a green
+  Woodpecker push or tag status (`ci/woodpecker/push/ci` | `ci/woodpecker/tag/ci`), and — from 2026-10-25 (`PR_REQUIRED_FROM`) —
+  came from a merged PR into `main`/`hotfix/*` (before that date: a WARN line). A refused tag makes the run red until it is
+  either fixed by a new tag or listed in `registry/ignored-tags.json` (PR only: `{repo, tag, reason, decision}`). Private repos
+  are read with `TB_PRIVATE_READ_TOKEN`, which needs Contents, Metadata, Commit statuses and Pull requests: read.
+- **Channels (E4).** A new app or bridge tag is indexed on `dev` only, with its image. `stable` comes only from a recorded
+  promotion in `registry/promotions.json` (PR only): `{product, version, devReleaseId, promotedAt, by, decision, evidence:
+  {soakStart, soakEnd, workspace, qaRun, platform: {core, bridge}, upgradeTest?}, expedited?, incident?}`. registry-sync
+  checks the dev record (image, not dev-only, no stable record of that version yet), the soak (app 24 h, bridge 48 h, from the
+  dev publish time; `expedited` needs `incident: "INC-…"`) and emits a NEW stable record that copies the dev record (same
+  image, manifest digest, services, runtime) with `promotedFrom: <dev id>`. mergeIndex refuses any other new stable app/bridge
+  record. Records that were stable before E4 stay stable; cli/package keep the version rule; desktop is added by hand.
+  Procedure: `coordination/practice/PROMOTE-STABLE.md` (operator) and the `promote-stable` skill.
+

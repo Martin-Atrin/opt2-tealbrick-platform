@@ -64,6 +64,7 @@ import {
   PG_DONE_MARKER,
   PG_MARKER,
   PG_TEST_URL,
+  PR_REQUIRED_FROM,
   PRIVATE_REPOS,
   packageBuildArgs,
   packageManagerPinned,
@@ -75,8 +76,10 @@ import {
   parsePreReleaseChecks,
   preReleaseEnv,
   productBindingProblem,
+  promotionReleases,
   REGISTRY_EXTRA_ASSETS,
   releaseChannel,
+  releaseGuard,
   releaseUrl,
   renderImagesScript,
   repoAliases,
@@ -86,6 +89,7 @@ import {
   resolveDistBase,
   sha512Integrity,
   skillsArchive,
+  tagChannel,
   tarballName,
   tarEntries,
   templateVersion,
@@ -94,8 +98,10 @@ import {
   validateBridgeRuntime,
   validateConfig,
   validateHarnesses,
+  validateIgnoredTags,
   validateOffers,
   validateProducts,
+  validatePromotions,
   verifyImageProvenance,
   verifyOwnerRewrites,
   versionFromTag,
@@ -151,7 +157,7 @@ const rel = (over: Partial<IndexRelease>): IndexRelease => ({
   product: "knowledge",
   kind: "app",
   version: "0.1.0",
-  channel: "stable",
+  channel: "dev", // C207 E4: new app/bridge records land on dev; stable only by promotion
   manifestDigest: `sha256:${"c".repeat(64)}`,
   manifestUrl: null,
   skillsDigest: null,
@@ -205,11 +211,19 @@ test("index merge: add, idempotent re-add, immutable content, desktop kind, offe
     ["bridge", "knowledge", "tbd"],
   );
   const src = { repo: "Tealbrick/opt2-tealbrick-bridge", ref: "f".repeat(40), dockerfile: "Dockerfile" };
-  assert.throws(() => mergeIndex(null, [rel({ image: null, source: src })], [], "t"), /stable release needs an image/);
+  assert.throws(
+    () => mergeIndex(null, [rel({ channel: "stable", image: null, source: src })], [], "t"),
+    /promotedFrom/,
+    "C207 E4: no new stable without a promotion",
+  );
   assert.equal(mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null, source: src })], [], "t").releases.length, 1);
   assert.throws(() => mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null })], [], "t"), /image or source/);
   const devSrc = mergeIndex(null, [rel({ channel: "dev", image: null, source: src })], [], "t");
-  assert.equal(mergeIndex(devSrc, [rel({})], [], "t2").releases.length, 2, "dev source 0.1.0 and stable image 0.1.0 coexist");
+  assert.equal(
+    mergeIndex(devSrc, [rel({ id: "rel_01JA0000000000000000000002" })], [], "t2").releases.length,
+    2,
+    "dev source 0.1.0 and dev image 0.1.0 coexist (C207 E4)",
+  );
 });
 
 test("offers validation", () => {
@@ -913,7 +927,7 @@ test("C113: devOnly mark + re-classification of an old stable record; identical 
     image: null,
     source: { repo: "x/y", ref: "a".repeat(40), dockerfile: "Dockerfile" },
   });
-  const other = rel({ id: "rel_01M4QA48XR9QC5QRDSC4E1T6D0", product: "connect", version: "0.5.0" });
+  const other = rel({ id: "rel_01M4QA48XR9QC5QRDSC4E1T6D0", product: "connect", version: "0.5.0", channel: "stable" });
   const { releases, notes } = normalizeDevOnly([devOld, oldStable, other, copyDev]);
   assert.deepEqual(
     releases.map((r) => [r.id, r.channel, r.devOnly ?? null]),
@@ -1328,6 +1342,10 @@ function fakeCliGitHub(opts: {
             { name: "relay-v0.1.0", commit: { sha: CLI_SHA } },
             { name: "harness-claude-v0.2.0", commit: { sha: CLI_SHA } },
           ]);
+    // C207 E1 release guard: the tag commit is on main, green, from a merged PR
+    if (url.startsWith(`${base}/compare/main...`)) return json(200, { status: "behind" });
+    if (url === `${base}/commits/${CLI_SHA}/status`) return json(200, { statuses: [{ context: "ci/woodpecker/push/ci", state: "success" }] });
+    if (url === `${base}/commits/${CLI_SHA}/pulls`) return json(200, [{ merged_at: "2026-10-15T00:00:00Z", base: { ref: "main" } }]);
     if (url === `${base}/releases/tags/cli-v0.2.0`)
       return opts.release === "none" ? json(404, {}) : json(200, { assets: assets.map(({ id, name }) => ({ id, name })) });
     if (url === `${base}/releases/tags/relay-v0.1.0`)
@@ -1888,4 +1906,144 @@ test("C206 R2-3: no internal machine / tailnet names in this public repo's track
     });
   }
   assert.deepEqual(hits, []);
+});
+
+test("C207 E1: release guard — main/hotfix, green Woodpecker, merged PR (warning before the cut-over, refusal after)", async () => {
+  const sha = "e".repeat(40);
+  const fake = (o: { compare?: string; hotfix?: string; status?: string; context?: string; merged?: boolean; prStatus?: number }) => async (path: string) => {
+    if (path.includes("/compare/main...")) return { status: 200, json: { status: o.compare ?? "behind" } };
+    if (path.includes("/compare/")) return { status: 200, json: { status: path.includes(encodeURIComponent(o.hotfix ?? "-")) ? "behind" : "diverged" } };
+    if (path.endsWith("/branches?per_page=100")) return { status: 200, json: [{ name: "main" }, { name: "hotfix/x" }, { name: "feature" }] };
+    if (path.endsWith("/status")) return { status: 200, json: { statuses: [{ context: o.context ?? "ci/woodpecker/push/ci", state: o.status ?? "success" }] } };
+    if (path.endsWith("/pulls"))
+      return { status: o.prStatus ?? 200, json: o.merged === false ? [] : [{ merged_at: "2026-10-16T00:00:00Z", base: { ref: "main" } }] };
+    return { status: 500, json: null };
+  };
+  const before = Date.parse(PR_REQUIRED_FROM) - 1;
+  const after = Date.parse(PR_REQUIRED_FROM) + 1;
+  assert.deepEqual(await releaseGuard(fake({}), "Tealbrick/x", sha, after), { problem: null, warnings: [] });
+  assert.deepEqual(await releaseGuard(fake({ compare: "identical" }), "Tealbrick/x", sha, after), { problem: null, warnings: [] });
+  assert.match((await releaseGuard(fake({ compare: "ahead" }), "Tealbrick/x", sha, after)).problem ?? "", /not on main or a hotfix/);
+  assert.equal((await releaseGuard(fake({ compare: "ahead", hotfix: "hotfix/x" }), "Tealbrick/x", sha, after)).problem, null, "hotfix/* accepted");
+  assert.match((await releaseGuard(fake({ status: "failure" }), "Tealbrick/x", sha, after)).problem ?? "", /no green Woodpecker/);
+  assert.match(
+    (await releaseGuard(fake({ context: "ci/woodpecker/pr/ci" }), "Tealbrick/x", sha, after)).problem ?? "",
+    /no green Woodpecker/,
+    "a PR status is not enough",
+  );
+  assert.equal((await releaseGuard(fake({ context: "ci/woodpecker/tag/ci" }), "Tealbrick/x", sha, after)).problem, null);
+  const warn = await releaseGuard(fake({ merged: false }), "Tealbrick/x", sha, before);
+  assert.equal(warn.problem, null);
+  assert.match(warn.warnings.join(), /no merged PR.*required from 2026-10-25/);
+  assert.match((await releaseGuard(fake({ merged: false }), "Tealbrick/x", sha, after)).problem ?? "", /no merged PR.*required since 2026-10-25/);
+  assert.match((await releaseGuard(fake({ prStatus: 403 }), "Tealbrick/x", sha, after)).problem ?? "", /Pull requests: read/);
+});
+
+test("C207 E1: ignored-tags.json validation (reviewed list; reason + decision)", () => {
+  assert.deepEqual(validateIgnoredTags([]), []);
+  const ok = { repo: "opt2-tealbrick-kanban", tag: "v0.2.0", reason: "tagged from a feature branch by mistake", decision: "C210" };
+  assert.equal(validateIgnoredTags([ok]).length, 1);
+  assert.throws(() => validateIgnoredTags([{ ...ok, decision: "none" }]), /decision/);
+  assert.throws(() => validateIgnoredTags([{ ...ok, reason: "x" }]), /reason/);
+  assert.throws(() => validateIgnoredTags([{ ...ok, extra: 1 }]), /fields/);
+  const committed = JSON.parse(readFileSync(new URL("../registry/ignored-tags.json", import.meta.url), "utf8"));
+  assert.doesNotThrow(() => validateIgnoredTags(committed));
+});
+
+test("C207 E4: new app/bridge tags land on dev; stable only by a recorded promotion with soak evidence (same image + manifest)", () => {
+  assert.equal(tagChannel("kanban", "0.2.0", "app"), "dev");
+  assert.equal(tagChannel("bridge", "0.1.31", "bridge"), "dev");
+  assert.equal(tagChannel("cli", "0.2.1", "cli"), "stable", "cli/package keep the version rule");
+  assert.equal(tagChannel("relay", "0.2.0-rc.1", "package"), "dev");
+  const dev = rel({ id: "rel_01M5DEVDEVDEVDEVDEVDEVDEV0", product: "kanban", version: "0.2.0", channel: "dev", publishedAt: "2026-10-20T00:00:00.000Z" });
+  const ev = {
+    soakStart: "2026-10-20T01:00:00Z",
+    soakEnd: "2026-10-21T02:00:00Z",
+    workspace: "qa1",
+    qaRun: "qa/reports/2026-10-21-regression.md",
+    platform: { core: "abcdef1", bridge: "0.1.30" },
+  };
+  const p = {
+    product: "kanban",
+    version: "0.2.0",
+    devReleaseId: dev.id,
+    promotedAt: "2026-10-21T03:00:00Z",
+    by: "coordinator",
+    decision: "C210",
+    evidence: ev,
+  };
+  const [vp] = validatePromotions([p]);
+  const idx = { releases: [dev] };
+  const out = promotionReleases(idx, [vp as never], { now: "2026-10-21T03:05:00Z", newId: () => "rel_01M5SSSSSSSSSSSSSSSSSSSSS0" });
+  assert.deepEqual(out.problems, []);
+  const st = out.add[0] as IndexRelease;
+  assert.equal(st.channel, "stable");
+  assert.equal(st.promotedFrom, dev.id);
+  assert.equal(st.image, dev.image);
+  assert.equal(st.manifestDigest, dev.manifestDigest);
+  assert.equal(st.id, "rel_01M5SSSSSSSSSSSSSSSSSSSSS0");
+  // mergeIndex accepts the promotion, refuses a hand-made stable record or a copy that changed the image
+  const i1 = mergeIndex({ schema: "opt2.release-index/v2", generatedAt: "t", releases: [dev], offers: [], harnesses: [] } as never, [st], [], "t2");
+  assert.equal(i1.releases.length, 2);
+  assert.throws(() => mergeIndex(null, [rel({ channel: "stable" })], [], "t"), /promotedFrom/);
+  assert.throws(
+    () =>
+      mergeIndex(
+        { schema: "opt2.release-index/v2", generatedAt: "t", releases: [dev], offers: [], harnesses: [] } as never,
+        [{ ...st, image: `ghcr.io/tealbrick/x@sha256:${"9".repeat(64)}` }],
+        [],
+        "t2",
+      ),
+    /promotion must copy/,
+  );
+  // idempotent: applied promotions are skipped
+  assert.deepEqual(promotionReleases({ releases: [dev, st] }, [vp as never], { now: "t" }), { add: [], problems: [] });
+  // soak rules: app 24 h, bridge 48 h, expedited needs an incident
+  const short = { ...p, evidence: { ...ev, soakEnd: "2026-10-20T12:00:00Z" } };
+  assert.match(promotionReleases(idx, validatePromotions([short]) as never, { now: "t" }).problems.join(), /soak 11\.0 h < 24 h/);
+  assert.equal(
+    promotionReleases(idx, validatePromotions([{ ...short, expedited: true, incident: "INC-7" }]) as never, {
+      now: "t",
+      newId: () => "rel_01M5SSSSSSSSSSSSSSSSSSSSS1",
+    }).add.length,
+    1,
+  );
+  assert.throws(() => validatePromotions([{ ...short, expedited: true }]), /incident/);
+  const bdev = rel({
+    id: "rel_01M5BBBBBBBBBBBBBBBBBBBBB0",
+    product: "bridge",
+    kind: "bridge",
+    version: "0.1.31",
+    channel: "dev",
+    manifestDigest: null,
+    publishedAt: "2026-10-20T00:00:00.000Z",
+  });
+  assert.match(
+    promotionReleases({ releases: [bdev] }, validatePromotions([{ ...p, product: "bridge", version: "0.1.31", devReleaseId: bdev.id }]) as never, {
+      now: "t",
+    }).problems.join(),
+    /< 48 h/,
+  );
+  // refusals
+  assert.match(promotionReleases({ releases: [] }, [vp as never], { now: "t" }).problems.join(), /not in the index/);
+  assert.match(
+    promotionReleases({ releases: [dev, rel({ ...dev, id: "rel_01M5ZZZZZZZZZZZZZZZZZZZZZ0", channel: "stable" })] }, [vp as never], {
+      now: "t",
+    }).problems.join(),
+    /already exists/,
+  );
+  assert.match(
+    promotionReleases({ releases: [{ ...dev, publishedAt: "2026-10-20T05:00:00.000Z" }] }, [vp as never], { now: "t" }).problems.join(),
+    /soak started before/,
+  );
+  const sample = rel({ ...dev, product: "sample-gate", devOnly: true });
+  assert.match(
+    promotionReleases({ releases: [sample] }, validatePromotions([{ ...p, product: "sample-gate" }]) as never, { now: "t" }).problems.join(),
+    /dev-only/,
+  );
+  assert.throws(() => validatePromotions([{ ...p, version: "0.2.0-rc.1" }]), /pre-release/);
+  assert.throws(() => validatePromotions([{ ...p, evidence: { ...ev, qaRun: "" } }]), /qaRun/);
+  assert.throws(() => validatePromotions([p, p]), /twice/);
+  const committed = JSON.parse(readFileSync(new URL("../registry/promotions.json", import.meta.url), "utf8"));
+  assert.doesNotThrow(() => validatePromotions(committed));
 });
