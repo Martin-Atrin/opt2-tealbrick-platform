@@ -798,9 +798,10 @@ test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile
 // ---------- ci-v9.4 ----------
 
 test("ci-v9.4: DEV_ONLY_PRODUCTS is one list; the signer indexes them on dev only and refuses stable", () => {
-  assert.deepEqual([...DEV_ONLY_PRODUCTS].sort(), ["sample-caller", "sample-gate", "sample-mismatch", "sample-pay"]);
+  assert.deepEqual([...DEV_ONLY_PRODUCTS].sort(), ["fleet", "sample-caller", "sample-gate", "sample-mismatch", "sample-pay"]); // C208: + fleet
   const src = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
-  for (const p of DEV_ONLY_PRODUCTS) assert.equal(src.split(`"${p}"`).length - 1, 1, `${p} is named once in tb-ci.ts (DEV_ONLY_PRODUCTS)`);
+  // "fleet" is also a repo name in OPT2_REPOS; the product list itself must be the only other mention
+  for (const p of DEV_ONLY_PRODUCTS) assert.equal(src.split(`"${p}"`).length - 1, p === "fleet" ? 2 : 1, `${p} is named once in tb-ci.ts (DEV_ONLY_PRODUCTS)`);
   // channel the signer derives: a plain x.y.z tag of a sample is still dev; other products keep the semver rule
   for (const p of DEV_ONLY_PRODUCTS) {
     assert.equal(releaseChannel(p, "0.1.2"), "dev");
