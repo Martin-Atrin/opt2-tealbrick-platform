@@ -31,6 +31,10 @@ const REPOS = [
   "evolution",
   "cli", // C173/C177: private repo (exists since 2026-10-15)
 ].map((n) => `opt2-tealbrick-${n}`);
+/** C203: private repos activated here that are NOT opt2 release repos (not in OPT2_REPOS / PRIVATE_REPOS: no releases, no
+ *  registry-sync, no template audit). Woodpecker visibility private (pipeline logs of proprietary code). */
+const ACTIVATE_PRIVATE: readonly string[] = ["opt2-tealbrick-admin"];
+const ALL_REPOS = [...REPOS, ...ACTIVATE_PRIVATE];
 const CFG = join(homedir(), ".config/opt2-tealbrick");
 
 const base = process.env.WOODPECKER_URL?.replace(/\/$/, "");
@@ -61,7 +65,7 @@ const me = await wp("GET", "/user");
 if (me.status !== 200) throw new Error(`token rejected by Woodpecker (HTTP ${me.status})`);
 console.log(`woodpecker user: ${me.json.login}`);
 
-for (const repo of REPOS) {
+for (const repo of ALL_REPOS) {
   const look = await wp("GET", `/repos/lookup/${OWNER}/${repo}`);
   let id: number | null = look.status === 200 && look.json?.active ? look.json.id : null;
   if (!id) {
@@ -77,7 +81,7 @@ for (const repo of REPOS) {
   }
   // Fork PRs need approval; no trusted/privileged settings. C154: a private GitHub repo gets private Woodpecker visibility
   // (pipeline logs of proprietary code only for users with repo access); every other repo stays public.
-  const visibility = PRIVATE_REPOS.includes(repo) ? "private" : "public";
+  const visibility = ACTIVATE_PRIVATE.includes(repo) ? "private" : PRIVATE_REPOS.includes(repo) ? "private" : "public";
   const patched = await wp("PATCH", `/repos/${id}`, { require_approval: "forks", visibility, timeout: 60 });
   console.log(`${repo}: settings ${patched.status === 200 ? "ok" : `FAILED (HTTP ${patched.status})`} (visibility ${visibility})`);
 }
@@ -102,8 +106,8 @@ for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? [])
   console.log(`org secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
 }
 const ids = new Map<string, number>();
-for (const repo of REPOS) ids.set(repo, (await wp("GET", `/repos/lookup/${OWNER}/${repo}`)).json.id as number);
-for (const repo of REPOS) {
+for (const repo of ALL_REPOS) ids.set(repo, (await wp("GET", `/repos/lookup/${OWNER}/${repo}`)).json.id as number);
+for (const repo of ALL_REPOS) {
   const id = ids.get(repo) as number;
   const want = WANT.filter((w) => w.repo === repo);
   for (const sec of ((await wp("GET", `/repos/${id}/secrets`)).json ?? []) as { name: string }[]) {
