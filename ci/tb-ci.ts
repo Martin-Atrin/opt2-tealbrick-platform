@@ -69,6 +69,10 @@ export const INDEX_PATH = "registry/index.json";
 export const ENVELOPE_PATH = "registry/index.jws";
 export const OFFERS_PATH = "registry/offers.json";
 export const HARNESSES_PATH = "registry/harnesses.json";
+/** C207 E4: recorded promotions dev → stable (reviewed input, PR only). */
+export const PROMOTIONS_PATH = "registry/promotions.json";
+/** C207 E1: tags the release guard must never index again (reviewed input, PR only): [{repo, tag, reason, decision}]. */
+export const IGNORED_TAGS_PATH = "registry/ignored-tags.json";
 /** GTP-01: the reviewed product → {repo, kind} binding the signer enforces (change by platform PR only). */
 export const PRODUCTS_PATH = "registry/products.json";
 export const REGISTRY_RELEASE_TAG = "registry";
@@ -202,6 +206,7 @@ export interface IndexRelease {
   tag: string | null;
   publishedAt: string;
   devOnly?: true; // C113: DEV_ONLY_PRODUCTS (always channel dev); Core never offers or deploys it in a stable workspace
+  promotedFrom?: string; // C207 E4: a stable record made by a recorded promotion of this dev record (same image + manifest digest)
 }
 
 /** Deploy recipe facts for the bridge service (apps carry these in their manifest `runtime`). */
@@ -388,6 +393,210 @@ export function normalizeDevOnly(releases: IndexRelease[]): { releases: IndexRel
   return { releases: marked.filter((r) => keep.has(r)), notes }; // original order
 }
 
+// ---------- C207 E1: release guard; C207 E4: recorded promotions ----------
+
+/** C207 E1: from this date a tag commit must also come from a merged PR (before it: a warning). */
+export const PR_REQUIRED_FROM = "2026-10-25T00:00:00Z";
+/** Woodpecker contexts that prove a green pipeline on the commit (push on main/hotfix, or the tag pipeline). */
+export const GREEN_CONTEXTS: readonly string[] = ["ci/woodpecker/push/ci", "ci/woodpecker/tag/ci"];
+
+export interface GuardResult {
+  problem: string | null;
+  warnings: string[];
+}
+
+/** C207 E1 release guard (ENFORCEMENT E1): a tag is indexed only if (1) its commit is on `main` or a `hotfix/*` branch head's
+ *  history, (2) the commit has a green Woodpecker push or tag status, (3) from PR_REQUIRED_FROM: the commit came from a merged
+ *  PR into main or hotfix/* (before: a warning). `api` reads the repo (read token for private repos: Contents, Metadata,
+ *  Commit statuses and Pull requests read). Pure apart from `api`. */
+export async function releaseGuard(
+  api: (path: string) => Promise<{ status: number; json: any }>,
+  fullRepo: string,
+  sha: string,
+  now: number = Date.now(),
+): Promise<GuardResult> {
+  const warnings: string[] = [];
+  const onBranch = async (branch: string): Promise<boolean> => {
+    const c = await api(`/repos/${fullRepo}/compare/${encodeURIComponent(branch)}...${sha}`);
+    // base...head: head (the tag commit) is in base's history when it is "behind" or "identical"
+    return c.status === 200 && (c.json?.status === "behind" || c.json?.status === "identical");
+  };
+  let branchOk = await onBranch("main");
+  let branchName = "main";
+  if (!branchOk) {
+    const br = await api(`/repos/${fullRepo}/branches?per_page=100`);
+    const hotfix = br.status === 200 && Array.isArray(br.json) ? (br.json as { name: string }[]).map((b) => b.name).filter((n) => n.startsWith("hotfix/")) : [];
+    for (const h of hotfix) {
+      if (await onBranch(h)) {
+        branchOk = true;
+        branchName = h;
+        break;
+      }
+    }
+  }
+  if (!branchOk) return { problem: `commit ${sha.slice(0, 8)} is not on main or a hotfix/* branch (E1)`, warnings };
+  const st = await api(`/repos/${fullRepo}/commits/${sha}/status`);
+  if (st.status !== 200)
+    return { problem: `commit status of ${sha.slice(0, 8)} not readable: HTTP ${st.status} (read token needs Commit statuses: read)`, warnings };
+  const statuses = ((st.json?.statuses ?? []) as { context: string; state: string }[]).filter((x) => GREEN_CONTEXTS.includes(x.context));
+  // the API lists the newest status first per context
+  const latest = new Map<string, string>();
+  for (const x of statuses) if (!latest.has(x.context)) latest.set(x.context, x.state);
+  if (![...latest.values()].includes("success")) return { problem: `commit ${sha.slice(0, 8)} has no green Woodpecker push/tag pipeline (E1)`, warnings };
+  const pr = await api(`/repos/${fullRepo}/commits/${sha}/pulls`);
+  const merged =
+    pr.status === 200 &&
+    Array.isArray(pr.json) &&
+    (pr.json as { merged_at: string | null; base?: { ref?: string } }[]).some(
+      (p) => p.merged_at && (p.base?.ref === "main" || p.base?.ref?.startsWith("hotfix/")),
+    );
+  if (!merged) {
+    const msg = `commit ${sha.slice(0, 8)} (${branchName}) has no merged PR${pr.status === 200 ? "" : ` (HTTP ${pr.status}: read token needs Pull requests: read)`}`;
+    if (now >= Date.parse(PR_REQUIRED_FROM)) return { problem: `${msg} (E1, required since ${PR_REQUIRED_FROM.slice(0, 10)})`, warnings };
+    warnings.push(`${msg}; required from ${PR_REQUIRED_FROM.slice(0, 10)} (E1)`);
+  }
+  return { problem: null, warnings };
+}
+
+export interface IgnoredTag {
+  repo: string; // opt2-tealbrick-<name>
+  tag: string;
+  reason: string;
+  decision: string; // C<nnn>
+}
+export function validateIgnoredTags(raw: unknown): IgnoredTag[] {
+  if (!Array.isArray(raw)) throw new Error("ignored-tags.json must be an array");
+  return raw.map((x, i) => {
+    const t = x as Record<string, unknown>;
+    if (!t || typeof t !== "object" || Object.keys(t).sort().join(",") !== "decision,reason,repo,tag")
+      throw new Error(`ignored-tags[${i}]: fields must be repo, tag, reason, decision`);
+    if (typeof t.repo !== "string" || !/^opt2-tealbrick-[a-z0-9-]+$/.test(t.repo)) throw new Error(`ignored-tags[${i}].repo`);
+    if (typeof t.tag !== "string" || !t.tag) throw new Error(`ignored-tags[${i}].tag`);
+    if (typeof t.reason !== "string" || t.reason.length < 10) throw new Error(`ignored-tags[${i}].reason (say why)`);
+    if (typeof t.decision !== "string" || !/^C\d{2,4}[a-z]?$/.test(t.decision)) throw new Error(`ignored-tags[${i}].decision must be a decision id (C<nnn>)`);
+    return t as unknown as IgnoredTag;
+  });
+}
+
+/** C207 E4: one recorded promotion dev → stable (registry/promotions.json, PR only). */
+export interface Promotion {
+  product: string;
+  version: string;
+  devReleaseId: string;
+  promotedAt: string;
+  by: string;
+  decision: string;
+  evidence: {
+    soakStart: string; // qa1 roll time (the dev release running on qa1)
+    soakEnd: string;
+    workspace: string; // qa1 (or another QA workspace on the dev channel)
+    qaRun: string; // regression run reference (qa report path or pipeline URL)
+    platform: { core: string; bridge: string }; // Core SHA + bridge version the soak ran against
+    upgradeTest?: string; // E14 Layer B result (release asset URL) once it exists
+  };
+  expedited?: true;
+  incident?: string;
+}
+/** Minimum soak on qa1 before a promotion (M9; bridge M11: 48 h). */
+export const SOAK_HOURS: Readonly<Record<"app" | "bridge", number>> = { app: 24, bridge: 48 };
+
+export function validatePromotions(raw: unknown): Promotion[] {
+  if (!Array.isArray(raw)) throw new Error("promotions.json must be an array");
+  const iso = (v: unknown) => typeof v === "string" && !Number.isNaN(Date.parse(v)) && /T.*Z$/.test(v);
+  const seen = new Set<string>();
+  return raw.map((x, i) => {
+    const p = x as Record<string, unknown>;
+    const bad = (m: string): never => {
+      throw new Error(`promotions[${i}]: ${m}`);
+    };
+    if (!p || typeof p !== "object") bad("must be an object");
+    const allowed = ["product", "version", "devReleaseId", "promotedAt", "by", "decision", "evidence", "expedited", "incident"];
+    const extra = Object.keys(p).filter((k) => !allowed.includes(k));
+    if (extra.length) bad(`unknown field(s) ${extra.join(", ")}`);
+    if (typeof p.product !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(p.product)) bad("product");
+    if (typeof p.version !== "string" || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(p.version)) bad("version");
+    if (/-/.test(p.version as string)) bad("a pre-release version is never promoted to stable");
+    if (typeof p.devReleaseId !== "string" || !/^rel_[0-9A-HJKMNP-TV-Z]{26}$/.test(p.devReleaseId)) bad("devReleaseId (rel_<ULID> of the dev record)");
+    if (!iso(p.promotedAt)) bad("promotedAt (ISO UTC)");
+    if (typeof p.by !== "string" || !p.by) bad("by");
+    if (typeof p.decision !== "string" || !/^C\d{2,4}[a-z]?$/.test(p.decision)) bad("decision (C<nnn>)");
+    const e = p.evidence as Record<string, unknown> | undefined;
+    if (!e || typeof e !== "object") bad("evidence");
+    const ev = e as Record<string, unknown>;
+    for (const k of ["soakStart", "soakEnd"]) if (!iso(ev[k])) bad(`evidence.${k} (ISO UTC)`);
+    if (Date.parse(ev.soakEnd as string) <= Date.parse(ev.soakStart as string)) bad("evidence.soakEnd must be after soakStart");
+    if (typeof ev.workspace !== "string" || !ev.workspace) bad("evidence.workspace (qa1)");
+    if (typeof ev.qaRun !== "string" || ev.qaRun.length < 5) bad("evidence.qaRun (regression run reference)");
+    const pl = ev.platform as Record<string, unknown> | undefined;
+    if (!pl || typeof pl.core !== "string" || !/^[0-9a-f]{7,40}$/.test(pl.core) || typeof pl.bridge !== "string" || !/^\d+\.\d+\.\d+/.test(pl.bridge))
+      bad("evidence.platform {core: <sha>, bridge: <version>}");
+    if (ev.upgradeTest !== undefined && (typeof ev.upgradeTest !== "string" || !/^https:\/\//.test(ev.upgradeTest))) bad("evidence.upgradeTest (https URL)");
+    const extraEv = Object.keys(ev).filter((k) => !["soakStart", "soakEnd", "workspace", "qaRun", "platform", "upgradeTest"].includes(k));
+    if (extraEv.length) bad(`unknown evidence field(s) ${extraEv.join(", ")}`);
+    if (p.expedited !== undefined && p.expedited !== true) bad("expedited must be true or absent");
+    if (p.expedited === true && (typeof p.incident !== "string" || !/^INC-/.test(p.incident))) bad("an expedited promotion needs incident INC-…");
+    if (p.incident !== undefined && p.expedited !== true) bad("incident only with expedited");
+    const key = `${p.product}@${p.version}`;
+    if (seen.has(key)) bad(`${key} is promoted twice`);
+    seen.add(key);
+    return p as unknown as Promotion;
+  });
+}
+
+/** C207 E4: the stable records the recorded promotions add to `index` (pure). A promotion that is already applied (a stable
+ *  record with promotedFrom = devReleaseId) is skipped. Problems (missing dev record, too short a soak, a stable record of
+ *  that version already present, …) are returned and nothing is added for that promotion. */
+export function promotionReleases(
+  index: { releases: IndexRelease[] },
+  promotions: Promotion[],
+  opts: { now: string; newId?: () => string },
+): { add: IndexRelease[]; problems: string[] } {
+  const add: IndexRelease[] = [];
+  const problems: string[] = [];
+  for (const p of promotions) {
+    const where = `promotion ${p.product}@${p.version}`;
+    if (index.releases.some((r) => r.promotedFrom === p.devReleaseId)) continue; // applied
+    const dev = index.releases.find((r) => r.id === p.devReleaseId);
+    if (!dev) {
+      problems.push(`${where}: dev record ${p.devReleaseId} is not in the index`);
+      continue;
+    }
+    if (dev.product !== p.product || dev.version !== p.version) {
+      problems.push(`${where}: ${p.devReleaseId} is ${dev.product}@${dev.version}`);
+      continue;
+    }
+    if (dev.kind !== "app" && dev.kind !== "bridge") {
+      problems.push(`${where}: only app and bridge releases are promoted (got ${dev.kind})`);
+      continue;
+    }
+    if (dev.channel !== "dev" || !dev.image) {
+      problems.push(`${where}: ${p.devReleaseId} must be a dev record with an image`);
+      continue;
+    }
+    if (dev.devOnly || isDevOnlyProduct(dev.product)) {
+      problems.push(`${where}: ${dev.product} is dev-only (C113)`);
+      continue;
+    }
+    if (index.releases.some((r) => r.product === p.product && r.version === p.version && r.channel === "stable")) {
+      problems.push(`${where}: a stable ${p.product}@${p.version} record already exists`);
+      continue;
+    }
+    const hours = (Date.parse(p.evidence.soakEnd) - Date.parse(p.evidence.soakStart)) / 3_600_000;
+    const need = SOAK_HOURS[dev.kind];
+    if (hours < need && p.expedited !== true) {
+      problems.push(`${where}: soak ${hours.toFixed(1)} h < ${need} h on ${p.evidence.workspace} (expedited needs an incident)`);
+      continue;
+    }
+    if (Date.parse(p.evidence.soakStart) < Date.parse(dev.publishedAt)) {
+      problems.push(`${where}: soak started before the dev release was published (${dev.publishedAt})`);
+      continue;
+    }
+    const { devOnly: _d, ...rest } = dev;
+    add.push({ ...rest, id: (opts.newId ?? (() => newId("rel")))(), channel: "stable", promotedFrom: dev.id, publishedAt: opts.now });
+  }
+  return { add, problems };
+}
+
 /** C206 R2-1: one legacy-owner location in a signed record moved to OWNER (same repo name; GitHub transfer). */
 export interface OwnerRewrite {
   id: string;
@@ -473,6 +682,13 @@ export async function verifyOwnerRewrites(
     }
   }
   return problems;
+}
+
+/** C207 E4: the channel a NEW tag of `kind` is indexed on. App and bridge tags always land on `dev`; `stable` comes only from a
+ *  recorded promotion (registry/promotions.json). Other kinds keep releaseChannel (cli/package by version; desktop by hand). */
+export function tagChannel(product: string, version: string, kind: IndexKind): Channel {
+  if (kind === "app" || kind === "bridge") return "dev";
+  return releaseChannel(product, version);
 }
 
 /** The channel the signer indexes a release on: a dev-only product is always "dev", whatever its version says. */
@@ -1175,6 +1391,8 @@ export function distReleaseFromAssets(input: {
 export interface CliSourceResult {
   add: IndexRelease[];
   rejected: string[];
+  /** C207 E1: release-guard warnings (PR missing before the cut-over date) */
+  warnings: string[];
   /** why the source was skipped as a whole (null = it ran) */
   pending: string | null;
 }
@@ -1190,8 +1408,10 @@ export async function cliSourceReleases(opts: {
   fetcher?: typeof fetch;
   now?: () => string;
   distBase?: string;
+  /** C207 E1: release guard per new tag (default releaseGuard over the same read-token API). */
+  guard?: (fullRepo: string, sha: string) => Promise<GuardResult>;
 }): Promise<CliSourceResult> {
-  const out: CliSourceResult = { add: [], rejected: [], pending: null };
+  const out: CliSourceResult = { add: [], rejected: [], warnings: [], pending: null };
   if (!opts.token) {
     out.pending = `no ${PRIVATE_READ_TOKEN_ENV} (C164: Martin's read-only token for the private repos)`;
     return out;
@@ -1202,6 +1422,17 @@ export async function cliSourceReleases(opts: {
       headers: { authorization: `Bearer ${opts.token}`, accept, "x-github-api-version": "2022-11-28" },
       redirect: "follow",
     });
+  const apiJson = async (path: string): Promise<{ status: number; json: any }> => {
+    const r = await api(path);
+    const text = await r.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = text;
+    }
+    return { status: r.status, json };
+  };
   const tagRe = /^([a-z0-9][a-z0-9-]*)-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
   // C206 B6: every repo that releases a DIST_PRODUCTS product (CLI repo first, as before)
   const repos = [...new Set([CLI_REPO, ...Object.values(DIST_PRODUCTS).map(distRepo)])];
@@ -1257,6 +1488,14 @@ export async function cliSourceReleases(opts: {
         const find = (n: string) => assets.find((a) => a.name === n);
         const tgzAsset = find(name);
         if (!tgzAsset) continue; // not uploaded yet: pending
+        // C207 E1: release guard (main/hotfix, green Woodpecker, merged PR from the cut-over date); only once the release has
+        // its tarball, so a tag whose release Action has not run (or could not run) stays pending, not red
+        const g = await (opts.guard ?? ((full: string, sha: string) => releaseGuard(apiJson, full, sha)))(`${OWNER}/${repo}`, t.commit.sha);
+        for (const w of g.warnings) out.warnings.push(`${where}: ${w}`);
+        if (g.problem) {
+          out.rejected.push(`${where}: ${g.problem}`);
+          continue;
+        }
         const shaAsset = find(`${name}.sha256`);
         const intAsset = find(`${name}.integrity`);
         if (!shaAsset || (!intAsset && !distIntegrityOptional(d, version))) {
@@ -1308,6 +1547,19 @@ export function mergeIndex(
   for (const r of add) {
     if (r.channel === "stable" && isDevOnlyProduct(r.product))
       throw new Error(`${r.product}@${r.version}: ${r.product} is dev-only (DEV_ONLY_PRODUCTS); the signer refuses a stable release`);
+    // C207 E4: a NEW stable app/bridge record exists only as a promotion of an indexed dev record (same image + manifest)
+    if (r.channel === "stable" && (r.kind === "app" || r.kind === "bridge")) {
+      const from = r.promotedFrom ? releases.find((x) => x.id === r.promotedFrom) : undefined;
+      if (!from) throw new Error(`${r.product}@${r.version}: a new stable ${r.kind} record needs promotedFrom = an indexed dev record (C207 E4)`);
+      if (
+        from.channel !== "dev" ||
+        from.product !== r.product ||
+        from.version !== r.version ||
+        from.image !== r.image ||
+        from.manifestDigest !== r.manifestDigest
+      )
+        throw new Error(`${r.product}@${r.version}: promotion must copy dev record ${from.id} (same product, version, image, manifest digest)`);
+    }
     if (!(INDEX_KINDS as readonly string[]).includes(r.kind)) throw new Error(`${r.product}@${r.version}: unknown kind ${JSON.stringify(r.kind)}`);
     const fileKind = r.kind === "desktop" || r.kind === "cli" || r.kind === "package"; // released as a downloadable file, not an image
     if (!fileKind && r.channel === "stable" && !r.image)
@@ -1328,7 +1580,8 @@ export function mergeIndex(
     const earlier = releases.find((x) => x.product === r.product && x.repo !== r.repo && !(same.includes(x.repo) && same.includes(r.repo)));
     if (earlier)
       throw new Error(`${r.product}@${r.version}: earlier releases of ${r.product} come from ${earlier.repo}; a release from ${r.repo} is refused (GTP-01)`);
-    const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
+    // C207 E4: a dev SOURCE record (C29) and the dev IMAGE record of the same version are two releases (both land on dev now)
+    const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel && Boolean(x.image) === Boolean(r.image));
     if (old) {
       if (
         old.image !== r.image ||
@@ -2633,7 +2886,7 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
       product: c.product,
       kind: c.kind,
       version: c.version,
-      channel: releaseChannel(c.product, c.version),
+      channel: tagChannel(c.product, c.version, c.kind), // C207 E4: new app/bridge tags → dev
       manifestDigest,
       manifestUrl,
       skillsDigest,
@@ -2725,6 +2978,13 @@ async function cmdRegistrySync(): Promise<void> {
   const add: IndexRelease[] = [];
   const rejected: string[] = [];
   const bindings = loadProductBindings();
+  // C207 E1/E4: reviewed inputs from main
+  const ignoredText = await ghFile(IGNORED_TAGS_PATH, "main");
+  const ignored = new Set(validateIgnoredTags(ignoredText ? JSON.parse(ignoredText) : []).map((t) => `${t.repo}@${t.tag}`));
+  const promotionsText = await ghFile(PROMOTIONS_PATH, "main");
+  const promotions = validatePromotions(promotionsText ? JSON.parse(promotionsText) : []);
+  // C207 E4: an app/bridge version that already has an image record (stable from before E4, dev, or promoted) is indexed
+  const imaged = new Set((index?.releases ?? []).filter((r) => (r.kind === "app" || r.kind === "bridge") && r.image).map((r) => `${r.product}@${r.version}`));
   for (const repo of OPT2_REPOS) {
     if (repo === CLI_REPO) continue; // C174: private; read below by the cli source with the read-only token, never with GITHUB_TOKEN
     const rd = repoReader(repo); // C154: PRIVATE_REPOS are read with TB_PRIVATE_READ_TOKEN, never with GITHUB_TOKEN
@@ -2748,8 +3008,22 @@ async function cmdRegistrySync(): Promise<void> {
         continue;
       }
       if (!doc) continue; // no images for this tag (yet): pending, not an error
-      for (const c of doc.candidates) {
-        if (known.has(`${c.product}@${version}@${releaseChannel(c.product, version)}`)) continue;
+      const fresh = doc.candidates.filter(
+        (c) => !imaged.has(`${c.product}@${version}`) && !known.has(`${c.product}@${version}@${tagChannel(c.product, version, c.kind)}`),
+      );
+      if (!fresh.length) continue;
+      if (ignored.has(`${repo}@${t.name}`)) {
+        log(`registry-sync: ${repo} ${t.name} is in ${IGNORED_TAGS_PATH}; not indexed`);
+        continue;
+      }
+      // C207 E1: release guard (main/hotfix, green Woodpecker, merged PR from the cut-over date)
+      const guard = await releaseGuard((path) => rd.api(path), doc.repo, doc.commit);
+      for (const w of guard.warnings) log(`registry-sync: WARN ${repo} ${t.name}: ${w}`);
+      if (guard.problem) {
+        rejected.push(`${repo} ${t.name}: ${guard.problem}`);
+        continue;
+      }
+      for (const c of fresh) {
         // GTP-01: a tag in one repo can never sign another repo's product (e.g. samples declaring product "bridge").
         const bound = productBindingProblem(bindings, { product: c.product, kind: c.kind, repo: doc.repo });
         if (bound) {
@@ -2761,7 +3035,8 @@ async function cmdRegistrySync(): Promise<void> {
         else {
           add.push(r);
           known.add(`${r.product}@${r.version}@${r.channel}`);
-          log(`verified ${r.product}@${r.version} from ${repo}@${doc.commit.slice(0, 8)}`);
+          imaged.add(`${r.product}@${r.version}`);
+          log(`verified ${r.product}@${r.version} (${r.channel}) from ${repo}@${doc.commit.slice(0, 8)}`);
         }
       }
     }
@@ -2769,6 +3044,7 @@ async function cmdRegistrySync(): Promise<void> {
   // C174: the cli tarball (C173 installer). Pending (green, no entry) until Martin's read token exists.
   const cli = await cliSourceReleases({ token: process.env[PRIVATE_READ_TOKEN_ENV] || undefined, known });
   if (cli.pending) log(`registry-sync: PEND cli source: ${cli.pending}; no cli entry this run`);
+  for (const w of cli.warnings) log(`registry-sync: WARN ${w}`);
   for (const r of cli.add) {
     const bound = productBindingProblem(bindings, r);
     if (bound) rejected.push(`${r.repo} ${r.tag} ${r.product}: ${bound}`);
@@ -2778,6 +3054,13 @@ async function cmdRegistrySync(): Promise<void> {
     }
   }
   rejected.push(...cli.rejected);
+  // C207 E4: recorded promotions dev → stable (same image + manifest digest; soak evidence validated)
+  const promoted = promotionReleases(index ?? { releases: [] }, promotions, { now: new Date().toISOString() });
+  for (const r of promoted.add) {
+    add.push(r);
+    log(`promoted ${r.product}@${r.version} to stable from ${r.promotedFrom}`);
+  }
+  rejected.push(...promoted.problems);
   const offersText = await ghFile(OFFERS_PATH, "main");
   const harnessesText = await ghFile(HARNESSES_PATH, "main");
   const offersChanged = JSON.stringify(validateOffers(offersText ? JSON.parse(offersText) : [])) !== JSON.stringify(index?.offers ?? []);
