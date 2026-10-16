@@ -248,7 +248,9 @@ async function publicUrl(ctx: Ctx, service: ServiceName): Promise<string | null>
     { e: ctx.envId, s: ctx.services[service] },
   );
   const dm = d.serviceInstance?.domains;
-  const host = dm?.customDomains[0]?.domain ?? dm?.serviceDomains[0]?.domain;
+  // C206: smoke the Railway service domain first. A custom domain can sit behind a DNS-level redirect during the cutover
+  // (www.tealbrick.com 301s to the apex until E4), which would fail a correct deployment's smoke.
+  const host = dm?.serviceDomains[0]?.domain ?? dm?.customDomains[0]?.domain;
   return host ? `https://${host}` : null;
 }
 
