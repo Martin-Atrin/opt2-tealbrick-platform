@@ -276,6 +276,10 @@ async function smoke(ctx: Ctx, service: ServiceName): Promise<{ check: string; o
   const gui = await publicUrl(ctx, "portal-gui");
   if (service === "portal-core" || service === "portal-gui") {
     if (!gui) return [{ check: "gateway", ok: service === "portal-core", detail: "no portal-gui domain yet (Core: Railway health check only)" }];
+    // First promotion: the GUI has a domain but no deployment yet ("Application not found"); Core's Railway health check
+    // (after migrations) is then the Core smoke, and the gateway checks run in the GUI step.
+    if (service === "portal-core" && !(await runningSha(ctx, "portal-gui")))
+      return [{ check: "gateway", ok: true, detail: "portal-gui not deployed yet: Core = Railway health check only; gateway checked in the GUI step" }];
     return [
       await httpCheck("gui / 200", `${gui}/`, (r) => r.status === 200),
       await httpCheck("gateway → Core: /api/v1/me 401 error", `${gui}/api/v1/me`, (r, b) => r.status === 401 && b.includes('"error"')),
