@@ -1477,6 +1477,9 @@ test("C154: an unreadable private repo is a loud registry-sync rejection naming 
   const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
   assert.ok(activate.includes('PRIVATE_REPOS.includes(repo) ? "private" : "public"'), "Woodpecker visibility follows PRIVATE_REPOS");
   assert.ok(!activate.includes('visibility: "public"'), "no repo is forced public in Woodpecker");
+  // C203: the private Admin GUI repo is activated with private logs, outside OPT2_REPOS (it publishes nothing)
+  assert.ok(/const ACTIVATE_PRIVATE[^=]*= \["opt2-tealbrick-admin"\]/.test(activate), "Admin GUI repo activated as private");
+  assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-admin"), "the Admin GUI repo is not an opt2 release repo");
 });
 
 test("BSD-08: the Portal key-set statement is a registry release asset next to the index (Core's default PORTAL_KEYSET_URL)", () => {
