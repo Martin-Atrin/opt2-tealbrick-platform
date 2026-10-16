@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-16T20:17:09.127Z",
+  "generatedAt": "2026-10-16T20:25:14.332Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -3896,6 +3896,28 @@
       "commit": "0c72de028154991beffdfd1eccd82d28b977311b",
       "tag": "v0.1.13-dev.1",
       "publishedAt": "2026-10-16T16:09:33.099Z"
+    },
+    {
+      "id": "rel_01M5367AQ8BPC00TBQCY6ZYE9H",
+      "product": "kanban",
+      "kind": "app",
+      "version": "0.1.13-dev.2",
+      "channel": "dev",
+      "manifestDigest": "sha256:ed2e23e972e5ad83ac8ab3d9af7bc3b65acc34673e5bb3abac530d291720a048",
+      "manifestUrl": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-kanban/a397aeecf5dcda3c3f9e03cdab7017047c9ed667/tealbrick.manifest.json",
+      "skillsDigest": "sha256:8dc4d734a4a407d0472269a70a6c0bf1d37c9bad5ec0544e527728f7ce2a90e9",
+      "image": "ghcr.io/tealbrick/opt2-tealbrick-kanban@sha256:147c1402453d23f06417ed05dbd511d99fa3e49a1782fcecb95619be539da543",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-kanban",
+      "commit": "a397aeecf5dcda3c3f9e03cdab7017047c9ed667",
+      "tag": "v0.1.13-dev.2",
+      "publishedAt": "2026-10-16T20:24:59.368Z"
     },
     {
       "id": "rel_01M4NBEHRQ84GFT0Y316P40NJ6",
