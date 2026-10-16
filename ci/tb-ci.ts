@@ -388,6 +388,93 @@ export function normalizeDevOnly(releases: IndexRelease[]): { releases: IndexRel
   return { releases: marked.filter((r) => keep.has(r)), notes }; // original order
 }
 
+/** C206 R2-1: one legacy-owner location in a signed record moved to OWNER (same repo name; GitHub transfer). */
+export interface OwnerRewrite {
+  id: string;
+  product: string;
+  version: string;
+  field: "manifestUrl" | "source.repo" | "artifact.url";
+  from: string;
+  to: string;
+}
+
+const LEGACY_OWNER_ALT = LEGACY_OWNERS.join("|");
+/** C206 R2-1: signed records published before the org move point manifestUrl (raw), source.repo and desktop artifact.url at
+ *  the legacy owner, which resolve only through GitHub's transfer redirect. They are rewritten to OWNER (same repo, same
+ *  commit/tag, so the bytes are the same; publishIndex verifies every rewritten location against the record's digests before
+ *  it signs). `repo` (provenance, GTP-01 formerRepos) and image refs (packages never moved) are NOT touched. Idempotent. */
+export function normalizeLegacyOwners(releases: IndexRelease[]): { releases: IndexRelease[]; rewrites: OwnerRewrite[] } {
+  const rewrites: OwnerRewrite[] = [];
+  const rawRe = new RegExp(`^https://raw\\.githubusercontent\\.com/(?:${LEGACY_OWNER_ALT})/(opt2-tealbrick-[a-z0-9-]+)/`);
+  const relRe = new RegExp(`^https://github\\.com/(?:${LEGACY_OWNER_ALT})/(opt2-tealbrick-[a-z0-9-]+)/releases/download/`);
+  const repoRe = new RegExp(`^(?:${LEGACY_OWNER_ALT})/(opt2-tealbrick-[a-z0-9-]+)$`);
+  const out = releases.map((r) => {
+    let next = r;
+    const note = (field: OwnerRewrite["field"], from: string, to: string) =>
+      rewrites.push({ id: r.id, product: r.product, version: r.version, field, from, to });
+    if (typeof r.manifestUrl === "string" && rawRe.test(r.manifestUrl)) {
+      const to = r.manifestUrl.replace(rawRe, (_m, repo: string) => `https://raw.githubusercontent.com/${OWNER}/${repo}/`);
+      note("manifestUrl", r.manifestUrl, to);
+      next = { ...next, manifestUrl: to };
+    }
+    if (r.source && typeof r.source.repo === "string" && repoRe.test(r.source.repo)) {
+      const to = r.source.repo.replace(repoRe, (_m, repo: string) => `${OWNER}/${repo}`);
+      note("source.repo", r.source.repo, to);
+      next = { ...next, source: { ...r.source, repo: to } };
+    }
+    if (r.kind === "desktop" && r.artifact && typeof r.artifact.url === "string" && relRe.test(r.artifact.url)) {
+      const to = r.artifact.url.replace(relRe, (_m, repo: string) => `https://github.com/${OWNER}/${repo}/releases/download/`);
+      note("artifact.url", r.artifact.url, to);
+      next = { ...next, artifact: { ...r.artifact, url: to } };
+    }
+    return next;
+  });
+  return { releases: out, rewrites };
+}
+
+/** C206 R2-1: before signing, every rewritten location must serve what the signed record pins: the manifest at the new raw
+ *  URL has the record's manifestDigest (private repos read with the read token), the source commit exists in the org repo,
+ *  a desktop artifact has the record's sha256. Returns the problems (empty = all verified). */
+export async function verifyOwnerRewrites(
+  m: Pick<ManifestPkg, "manifestDigest">,
+  releases: IndexRelease[],
+  rewrites: OwnerRewrite[],
+  reader: (repo: string) => RepoReader = (repo) => repoReader(repo),
+  fetcher: typeof fetch = fetch,
+): Promise<string[]> {
+  const problems: string[] = [];
+  const byId = new Map(releases.map((r) => [r.id, r]));
+  for (const w of rewrites) {
+    const r = byId.get(w.id);
+    const where = `${w.product}@${w.version} ${w.field}`;
+    try {
+      if (!r) throw new Error("record not found");
+      if (w.field === "manifestUrl") {
+        const mm = /^https:\/\/raw\.githubusercontent\.com\/[^/]+\/(opt2-tealbrick-[a-z0-9-]+)\/([^/]+)\/(.+)$/.exec(w.to);
+        if (!mm) throw new Error(`unexpected URL ${w.to}`);
+        const f = await reader(mm[1] as string).file(mm[3] as string, mm[2] as string);
+        if (f.text === null) throw new Error(`HTTP ${f.status} at ${w.to}`);
+        const d = m.manifestDigest(JSON.parse(f.text));
+        if (d !== r.manifestDigest) throw new Error(`digest ${d} != signed ${r.manifestDigest}`);
+      } else if (w.field === "source.repo") {
+        const ref = r.source?.ref;
+        const res = await reader(w.to.split("/")[1] as string).api(`/repos/${w.to}/commits/${ref}`);
+        if (res.status !== 200 || res.json?.sha !== ref) throw new Error(`commit ${ref} not readable in ${w.to} (HTTP ${res.status})`);
+      } else {
+        const res = await fetcher(w.to, { redirect: "follow" });
+        if (!res.ok) throw new Error(`HTTP ${res.status} at ${w.to}`);
+        const got = `sha256:${createHash("sha256")
+          .update(Buffer.from(await res.arrayBuffer()))
+          .digest("hex")}`;
+        if (got !== r.artifact?.sha256) throw new Error(`sha256 ${got} != signed ${r.artifact?.sha256}`);
+      }
+    } catch (e) {
+      problems.push(`${where}: ${(e as Error).message}`);
+    }
+  }
+  return problems;
+}
+
 /** The channel the signer indexes a release on: a dev-only product is always "dev", whatever its version says. */
 export function releaseChannel(product: string, version: string): Channel {
   return isDevOnlyProduct(product) ? "dev" : channelForVersion(version);
@@ -1257,7 +1344,7 @@ export function mergeIndex(
     }
     releases.push(r);
   }
-  const normalized = normalizeDevOnly(releases).releases; // C113
+  const normalized = normalizeLegacyOwners(normalizeDevOnly(releases).releases).releases; // C113, C206 R2-1
   releases.length = 0;
   releases.push(...normalized);
   releases.sort((x, y) => (x.product === y.product ? x.publishedAt.localeCompare(y.publishedAt) : x.product.localeCompare(y.product)));
@@ -2242,6 +2329,14 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     const harnesses = validateHarnesses(harnessesText ? JSON.parse(harnessesText) : []);
     const devOnlyNotes = normalizeDevOnly(prev?.releases ?? []).notes; // C113: what this publish changes in existing records
     const index = mergeIndex(prev, add, offers, new Date().toISOString(), harnesses, loadProductBindings());
+    // C206 R2-1: legacy-owner locations rewritten in this publish are verified before anything is signed
+    const ownerRewrites = normalizeLegacyOwners(prev?.releases ?? []).rewrites;
+    if (ownerRewrites.length) {
+      if (!m) fail("registry: legacy-owner rewrites need the manifest package to verify digests");
+      const problems = await verifyOwnerRewrites(m, prev?.releases ?? [], ownerRewrites);
+      if (problems.length) fail(`registry: legacy-owner rewrite not verified, nothing published:\n  - ${problems.join("\n  - ")}`);
+      log(`registry: ${ownerRewrites.length} legacy-owner location(s) rewritten to ${OWNER} and verified (C206 R2-1)`);
+    }
     const body = serializeIndex(index);
     let jws: string | null = null;
     if (key && m) {
@@ -2266,7 +2361,7 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       ],
     });
     if (tree.status !== 201) fail(`registry: create tree: HTTP ${tree.status}`);
-    const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}${
+    const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : ownerRewrites.length ? `registry: ${ownerRewrites.length} legacy-owner locations -> ${OWNER} (C206 R2-1)` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}${
       devOnlyNotes.length ? `\n\nC113 (DEV_ONLY_PRODUCTS, digests unchanged):\n${devOnlyNotes.map((n) => `- ${n}`).join("\n")}` : ""
     }`;
     const nc = await gh("POST", `/repos/${repoFullName(PLATFORM_REPO)}/git/commits`, { message: msg, tree: tree.json.sha, parents: [headSha] });
@@ -2691,7 +2786,8 @@ async function cmdRegistrySync(): Promise<void> {
   const exp = env ? (JSON.parse(Buffer.from(env.trim().split(".")[1], "base64url").toString("utf8")) as { exp: number }).exp : 0;
   const expiring = exp - Date.now() / 1000 < 30 * 86400;
   const devOnlyChanged = normalizeDevOnly(index?.releases ?? []).notes.length > 0; // C113: mark/re-classify existing records
-  if (add.length || offersChanged || harnessesChanged || expiring || devOnlyChanged) await publishIndex(m, add);
+  const ownerChanged = normalizeLegacyOwners(index?.releases ?? []).rewrites.length > 0; // C206 R2-1
+  if (add.length || offersChanged || harnessesChanged || expiring || devOnlyChanged || ownerChanged) await publishIndex(m, add);
   else {
     log("registry-sync: nothing new");
     await syncRegistryExtraAssets(); // a key file changed on main without an index change (e.g. a new key-set statement)
