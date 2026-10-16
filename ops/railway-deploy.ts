@@ -10,7 +10,9 @@ import { join } from "node:path";
 
 const PROJECT = "15297ce5-0283-4901-a408-9c802e6ac53a"; // Railway project "opt2"
 const DEV_ENVIRONMENT = "2a09b7be-6d8e-4981-a2b1-20bc7922fca5"; // production (= dev)
-const OWNER = "Martin-Atrin";
+/** C206: the opt2 repos live in the Tealbrick org; every deploy (re)sets the Railway source to Tealbrick/<repo>. Railway builds a
+ *  private org repo through its GitHub app, which must be installed on the Tealbrick org with access to that repo. */
+const OWNER = "Tealbrick";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
