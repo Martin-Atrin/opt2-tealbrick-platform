@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  adminReachable,
   CI_CONTEXT,
   checkIndex,
   ciGreen,
@@ -15,6 +16,7 @@ import {
   type ReleaseSet,
   recordPath,
   rollbackCommand,
+  smokeHost,
 } from "./promote.ts";
 
 const sha = (c: string) => c.repeat(40);
@@ -173,4 +175,20 @@ test("--rollback: app-index problems become warnings; services still checked", (
   const p = ["fleet@0.1.10 is not a stable app release in the index"];
   assert.deepEqual(indexProblems(p, true), { fatal: [], warnings: p });
   assert.deepEqual(indexProblems(p, false), { fatal: p, warnings: [] });
+});
+
+test("smokeHost: custom non-www first, then the Railway domain, then www", () => {
+  assert.equal(smokeHost(["www.tealbrick.com", "tealbrick.com"], ["website-live.up.railway.app"]), "tealbrick.com");
+  assert.equal(smokeHost(["www.tealbrick.com"], ["website-live.up.railway.app"]), "website-live.up.railway.app");
+  assert.equal(smokeHost(["www.tealbrick.com"], []), "www.tealbrick.com");
+  assert.equal(smokeHost([], []), null);
+});
+
+test("adminReachable: 200, or the Cloudflare Access login", () => {
+  assert.equal(adminReachable(200, null), true);
+  assert.equal(adminReachable(302, "https://tealbrick.cloudflareaccess.com/cdn-cgi/access/login/be.tealbrick.com"), true);
+  assert.equal(adminReachable(403, null), true);
+  assert.equal(adminReachable(302, "https://evil.example/"), false);
+  assert.equal(adminReachable(404, null), false);
+  assert.equal(adminReachable(502, null), false);
 });

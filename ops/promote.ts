@@ -149,6 +149,20 @@ export function checkIndex(set: ReleaseSet, releases: readonly IndexRelease[]): 
   return problems;
 }
 
+/** The host a smoke test uses: a custom domain that is not a www alias (www only 301s to the apex), else the Railway
+ *  service domain, else a www alias (C214: the Railway smoke domains are removed after the DNS switch). */
+export function smokeHost(custom: readonly string[], service: readonly string[]): string | null {
+  return custom.find((h) => !h.startsWith("www.")) ?? service[0] ?? custom[0] ?? null;
+}
+
+/** Cloudflare Access in front of the admin GUI (be.tealbrick.com, C203) answers an anonymous request with a redirect to
+ *  its login (or 401/403): that proves the host serves, so it counts as reachable for the smoke. */
+export function adminReachable(status: number, location: string | null): boolean {
+  if (status === 200) return true;
+  if ([301, 302, 303, 307].includes(status)) return /cloudflareaccess\.com|\/cdn-cgi\/access\//.test(location ?? "");
+  return status === 401 || status === 403;
+}
+
 /** Index (app/bridge) problems block a promotion, except for a rollback, where they are warnings (apps are not deployed). */
 export function indexProblems(problems: readonly string[], rollback: boolean): { fatal: string[]; warnings: string[] } {
   return rollback ? { fatal: [], warnings: [...problems] } : { fatal: [...problems], warnings: [] };
@@ -268,10 +282,10 @@ async function publicUrl(ctx: Ctx, service: ServiceName): Promise<string | null>
     "query($e:String!,$s:String!){ serviceInstance(environmentId:$e, serviceId:$s){ domains{ serviceDomains{ domain } customDomains{ domain } } } }",
     { e: ctx.envId, s: ctx.services[service] },
   );
-  const dm = d.serviceInstance?.domains;
-  // C206: smoke the Railway service domain first. A custom domain can sit behind a DNS-level redirect during the cutover
-  // (www.tealbrick.com 301s to the apex until E4), which would fail a correct deployment's smoke.
-  const host = dm?.serviceDomains[0]?.domain ?? dm?.customDomains[0]?.domain;
+  const host = smokeHost(
+    d.serviceInstance?.domains.customDomains.map((c) => c.domain) ?? [],
+    d.serviceInstance?.domains.serviceDomains.map((c) => c.domain) ?? [],
+  );
   return host ? `https://${host}` : null;
 }
 
@@ -311,7 +325,11 @@ async function smoke(ctx: Ctx, service: ServiceName): Promise<{ check: string; o
     // Admin GUI: only /healthz (no anonymous admin page). No domain yet = Railway health check only.
     const admin = await publicUrl(ctx, "admin-gui");
     if (!admin) return [{ check: "admin-gui", ok: true, detail: "no admin-gui domain: Railway health check only" }];
-    return [await httpCheck("admin-gui /healthz 200", `${admin}/healthz`, (r) => r.status === 200)];
+    return [
+      await httpCheck("admin-gui /healthz (200, or the Cloudflare Access login)", `${admin}/healthz`, (r) =>
+        adminReachable(r.status, r.headers.get("location")),
+      ),
+    ];
   }
   const gui = await publicUrl(ctx, "portal-gui");
   if (service === "portal-core" || service === "portal-gui") {
