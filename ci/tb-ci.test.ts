@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ import {
   newId,
   normalizeDevOnly,
   normalizeDistBase,
+  normalizeLegacyOwners,
   OPT2_REPOS,
   OWNER,
   PENDING_REPOS,
@@ -95,6 +97,7 @@ import {
   validateOffers,
   validateProducts,
   verifyImageProvenance,
+  verifyOwnerRewrites,
   versionFromTag,
   workspaceGlobs,
 } from "./tb-ci.ts";
@@ -1808,6 +1811,65 @@ test("C206 B6: a legacy version without the .integrity asset is indexed with the
   );
 });
 
+test("C206 R2-1: legacy-owner manifestUrl / source.repo / desktop artifact.url are rewritten to Tealbrick; repo + images untouched", async () => {
+  const sha = "a".repeat(40);
+  const app = rel({
+    id: "rel_01M4AAAAAAAAAAAAAAAAAAAAAA",
+    manifestUrl: `https://raw.githubusercontent.com/Martin-Atrin/${repo}/${sha}/tealbrick.manifest.json`,
+    repo: `Martin-Atrin/${repo}`,
+    image: `ghcr.io/martin-atrin/${repo}@sha256:${"b".repeat(64)}`,
+  });
+  const src = rel({
+    id: "rel_01M4BBBBBBBBBBBBBBBBBBBBBB",
+    channel: "dev",
+    image: null,
+    source: { repo: "Martin-Atrin/opt2-tealbrick-bridge", ref: sha, dockerfile: "Dockerfile" },
+  });
+  const desk = rel({
+    id: "rel_01M4CCCCCCCCCCCCCCCCCCCCCC",
+    product: "tbd",
+    kind: "desktop",
+    manifestUrl: null,
+    manifestDigest: null,
+    image: null,
+    artifact: { url: "https://github.com/Martin-Atrin/opt2-tealbrick-tbd/releases/download/v0.1.0/TBD.zip", sha256: `sha256:${"c".repeat(64)}` },
+  });
+  const done = rel({ id: "rel_01M4DDDDDDDDDDDDDDDDDDDDDD", manifestUrl: `https://raw.githubusercontent.com/Tealbrick/${repo}/${sha}/tealbrick.manifest.json` });
+  const { releases, rewrites } = normalizeLegacyOwners([app, src, desk, done]);
+  assert.deepEqual(
+    rewrites.map((w) => w.field),
+    ["manifestUrl", "source.repo", "artifact.url"],
+  );
+  assert.equal(releases[0]?.manifestUrl, `https://raw.githubusercontent.com/Tealbrick/${repo}/${sha}/tealbrick.manifest.json`);
+  assert.equal(releases[0]?.repo, `Martin-Atrin/${repo}`, "repo (provenance) stays");
+  assert.equal(releases[0]?.image, app.image, "images never move");
+  assert.equal(releases[1]?.source?.repo, "Tealbrick/opt2-tealbrick-bridge");
+  assert.equal(releases[2]?.artifact?.url, "https://github.com/Tealbrick/opt2-tealbrick-tbd/releases/download/v0.1.0/TBD.zip");
+  assert.equal(releases[3], done, "already-org records are returned as is");
+  assert.equal(normalizeLegacyOwners(releases).rewrites.length, 0, "idempotent");
+  // mergeIndex applies it to every record
+  const merged = mergeIndex({ schema: "opt2.release-index/v2", generatedAt: "t", releases: [app, src], offers: [], harnesses: [] } as never, [], [], "t2");
+  assert.equal(normalizeLegacyOwners(merged.releases).rewrites.length, 0);
+  // verification: digest of the manifest at the new URL, source commit in the org repo, artifact sha256
+  const fakeM = { manifestDigest: (j: unknown) => (JSON.stringify(j) === '{"ok":1}' ? app.manifestDigest : "sha256:other") } as never;
+  const reader =
+    (body: string, commitOk = true) =>
+    (_r: string) =>
+      ({
+        via: "read-token",
+        api: async () => (commitOk ? { status: 200, json: { sha } } : { status: 404, json: null }),
+        file: async () => ({ status: 200, text: body }),
+      }) as never;
+  const zip = new TextEncoder().encode("zip");
+  const zipSha = `sha256:${createHash("sha256").update(zip).digest("hex")}`;
+  const desk2 = { ...desk, artifact: { url: desk.artifact?.url as string, sha256: zipSha } };
+  const rw = normalizeLegacyOwners([app, src, desk2]).rewrites;
+  const okFetch = (async () => new Response(zip)) as typeof fetch;
+  assert.deepEqual(await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":1}'), okFetch), []);
+  assert.match((await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":2}'), okFetch)).join(";"), /manifestUrl: digest/);
+  assert.match((await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":1}', false), okFetch)).join(";"), /source\.repo: commit/);
+  const badFetch = (async () => new Response("other")) as typeof fetch;
+  assert.match((await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":1}'), badFetch)).join(";"), /artifact\.url: sha256/);
 test("C206 R2-3: no internal machine / tailnet names in this public repo's tracked files", () => {
   const files = execFileSync("git", ["ls-files"], { cwd: new URL("..", import.meta.url), encoding: "utf8" })
     .split("\n")
