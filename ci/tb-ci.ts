@@ -342,7 +342,9 @@ export function channelForVersion(version: string): Channel {
 
 /** ci-v9.4: products the signer indexes ONLY on channel "dev" (test fixtures; never offered to stable workspaces).
  *  The one list: releaseChannel() and mergeIndex() both read it. */
-export const DEV_ONLY_PRODUCTS: readonly string[] = ["sample-gate", "sample-caller", "sample-pay", "sample-mismatch"];
+/** C208: fleet is not shipped and its repo goes private (its manifestUrl 404s for Core), so it is dev-only: never offered to a
+ *  stable workspace (live has no dev workspaces). Its releases stay in the signed index (re-classified, nothing deleted). */
+export const DEV_ONLY_PRODUCTS: readonly string[] = ["sample-gate", "sample-caller", "sample-pay", "sample-mismatch", "fleet"];
 
 export function isDevOnlyProduct(product: string): boolean {
   return DEV_ONLY_PRODUCTS.includes(product);
