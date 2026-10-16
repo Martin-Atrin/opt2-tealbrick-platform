@@ -221,13 +221,32 @@ export function railwaySetArgs(name: string, service: string, environment: strin
 }
 
 async function askHidden(prompt: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
-  (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => {};
+  // Raw-mode reader: readline clears the prompt line on a TTY (cursorTo + clearScreenDown), so the prompt vanished.
   process.stderr.write(`${prompt}(hidden: paste with Cmd+V, nothing shows, then press Enter) `);
-  const answer = await new Promise<string>((r) => rl.question("", r));
-  rl.close();
-  process.stderr.write("\n");
-  return answer.trim();
+  const stdin = process.stdin;
+  return await new Promise<string>((resolve, reject) => {
+    let buf = "";
+    const done = (fn: () => void) => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      process.stderr.write("\n");
+      fn();
+    };
+    const onData = (chunk: Buffer) => {
+      // bracketed-paste markers from some terminals
+      const text = chunk.toString("utf8").replace(/\x1b\[20[01]~/g, "");
+      for (const ch of text) {
+        if (ch === "\r" || ch === "\n") return done(() => resolve(buf.trim()));
+        if (ch === "\u0003") return done(() => reject(new Error("stopped (Ctrl+C); nothing was set yet")));
+        if (ch === "\u007f" || ch === "\b") buf = buf.slice(0, -1);
+        else if (ch >= " ") buf += ch;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
 }
 
 async function ask(prompt: string): Promise<string> {
