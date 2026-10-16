@@ -223,7 +223,7 @@ export function railwaySetArgs(name: string, service: string, environment: strin
 async function askHidden(prompt: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
   (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = () => {};
-  process.stderr.write(prompt);
+  process.stderr.write(`${prompt}(hidden: paste with Cmd+V, nothing shows, then press Enter) `);
   const answer = await new Promise<string>((r) => rl.question("", r));
   rl.close();
   process.stderr.write("\n");
@@ -295,6 +295,7 @@ async function main(): Promise<void> {
           if (v !== "") {
             values.push(v);
             collected.push({ spec, value: v });
+            console.log(`  received ${spec.name}: ${v.length} characters, starts with "${v.slice(0, Math.min(8, Math.floor(v.length / 4)))}…"`);
           } else console.log(`  ${spec.name}: skipped`);
           break;
         }
