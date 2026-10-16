@@ -3,7 +3,7 @@
 The one enforced CI/CD template for every Tealbrick repo, the signed release registry (index, offers, harness options, Portal root and key-set statements), the signer, the deploy and promote scripts, the status page, the database backup job, and the operations runbooks.
 
 - Repository: `Tealbrick/opt2-tealbrick-platform` (GitHub organisation `Tealbrick`)
-- Status: main `9512b0a`. CI template `ci-v9.9` (also the minimum, `ci/MIN_TEMPLATE`). Signed index with 197 releases (app 127, package 38, bridge 29, desktop 3) and 10 offers. Live runs from the org repos; the status page watches live and dev.
+- Status: CI template `ci-v9.9` (also the minimum, `ci/MIN_TEMPLATE`). Signed index with 203 releases (app 133, package 38, bridge 29, desktop 3) and 10 offers (envelope issued 2026-10-16; the release count grows with every release). Live runs from the org repos; the status page watches live and dev.
 - Visibility target: PUBLIC and it must stay public (C181): every repo's pipeline fetches the CI runner from it anonymously, Core and the installers read the index from it, and a private repo would bill about 5,700 Actions minutes a month.
 - Licence: public repository with no licence file (`package.json` is `private`). The repo holds no secrets and no product source.
 
@@ -14,7 +14,7 @@ This repository is public. It must never contain secrets or personal data:
 - No API keys, tokens, passwords, private keys (the release signing key and the root keys included), deployment secrets, `.env` files or connection strings. Use placeholder values only.
 - Runtime secrets live in the deployment platform (Railway variables, GitHub Actions environment `registry`) and are copied between services without printing them. The Woodpecker pipelines hold no secrets.
 - No personal names, private agent configurations or customer data, in the code, issues or pull requests.
-- Every push runs a secret scan (gitleaks, the first step of `.woodpecker/ci.yaml`). GitHub secret scanning with push protection is enabled. Optional local guard: `pre-commit install`.
+- Every pipeline run (pull request, push to `main`, tag) starts with a secret scan (gitleaks, the first step of `.woodpecker/ci.yaml`). GitHub secret scanning and push protection are not enabled on this repository, so the CI scan is the guard. Optional local guard: `pre-commit install` (`.pre-commit-config.yaml` runs gitleaks).
 - If a secret is committed anyway: rotate it first, then remove it from history.
 
 ## What this repo is and is not
@@ -28,7 +28,7 @@ It is NOT a place for customer data or product code. Git is its store.
 ```sh
 corepack enable && pnpm install --frozen-lockfile --ignore-scripts
 pnpm typecheck && pnpm lint && pnpm test    # some tests fetch pinned tarballs: network needed
-pnpm stamp                                  # write the runner sha256 into the template and .woodpecker/ci.yaml
+pnpm stamp                                  # write the runner sha256 into the two templates and .woodpecker/ci.yaml
 ```
 
 Operator tools need the operator Mac's Railway CLI login (`~/.railway/config.json`) and `gh` login. They read no variable values.
