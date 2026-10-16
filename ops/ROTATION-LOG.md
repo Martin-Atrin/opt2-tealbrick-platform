@@ -7,6 +7,7 @@ Date and key id or subject only. Never a value, token, hash or webhook URL.
 | 2026-10-12 | portal-core Woodpecker hook token | leaked |
 | 2026-10-12 | website Woodpecker hook token | leaked |
 | 2026-10-12 | samples Woodpecker hook token (repo id 29) | transcript exposure |
+| 2026-10-16 | platform Woodpecker hook token (repo id 27) | hook URL printed in a session (C208); new hash + repair 204 |
 
 ## How: Woodpecker hook token (RUNBOOK section 4)
 
