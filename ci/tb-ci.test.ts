@@ -774,7 +774,8 @@ test("ci-v9.3: release-record pins the spec tarball with sha512 and the lockfile
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   const url = /TB_SPEC_PKG: (\S+)/.exec(tpl)?.[1] ?? "";
   const integrity = /TB_SPEC_INTEGRITY: (\S+)/.exec(tpl)?.[1] ?? "";
-  assert.match(url, /opt2-tealbrick-specs\/releases\/download\/spec-v(\d+\.\d+\.\d+)\/opt2-tealbrick-spec-\1\.tgz$/);
+  // C206 B6 (ci-v9.9): from the dist host
+  assert.match(url, /\/opt2-tealbrick-dist\/releases\/download\/opt2-tealbrick-specs-spec-v(\d+\.\d+\.\d+)\/opt2-tealbrick-spec-\1\.tgz$/);
   assert.match(integrity, /^sha512-[A-Za-z0-9+/]{86}==$/);
   // the same spec the signer's lockfile holds (and the one the pinned manifest package asks for)
   const lock = JSON.parse(readFileSync(new URL("../ops/signer/package-lock.json", import.meta.url), "utf8")) as {
@@ -1132,9 +1133,9 @@ test("ci-v9.6 pre-release step: no-op without checks, passes a good gate, fails 
 test("ci-v9.6 template: pre-release step after gen; image-check and release-record wait for it; workflow runs the checks on the tag", () => {
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   assert.equal(stepScript(tpl, "pre-release"), "node .tb-ci/tb-ci.ts pre-release");
-  assert.match(tpl.split("\n")[0] as string, /ci-v9\.8/, "current template (ci-v9.8 keeps the ci-v9.6 pre-release step)");
+  assert.match(tpl.split("\n")[0] as string, /ci-v9\.9/, "current template (ci-v9.9 keeps the ci-v9.6 pre-release step)");
   const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
-  assert.match(wf, /TB_CI_REF: ci-v9\.8/);
+  assert.match(wf, /TB_CI_REF: ci-v9\.9/);
   const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
   const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root)") > 0, "gh-build runs the checks on the tag");
@@ -1723,7 +1724,7 @@ test("C206 B0 probe: uploads go to the release's upload_url (uploads.github.com 
   assert.ok(!/\/repos\/\$\{OWNER\}\/\$\{repo\}\/releases/.test(runner), "release writes go through repoFullName");
 });
 
-test("C206 ci-v9.8 templates: runner + template from Tealbrick; pre-move manifest/spec pins kept until B6", () => {
+test("C206 ci-v9.8/9.9 templates: runner + template from Tealbrick; manifest/spec pins on the dist host (B6)", () => {
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
   for (const t of [tpl, wf]) {
