@@ -33,9 +33,17 @@ import {
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
+  ghcrFind,
+  IMAGE_NAMESPACE,
+  IMAGE_NAMESPACES,
   INDEX_KINDS,
   type IndexRelease,
+  imageNamespace,
   isDistTarballUrl,
+  isReleaseTarballUrl,
+  isSpecTarballUrl,
+  KNOWN_OWNERS,
+  LEGACY_OWNERS,
   loadManifestPkg,
   loadProductBindings,
   lockfileTarballs,
@@ -47,6 +55,7 @@ import {
   normalizeDevOnly,
   normalizeDistBase,
   OPT2_REPOS,
+  OWNER,
   PENDING_REPOS,
   PG_DONE_MARKER,
   PG_MARKER,
@@ -66,6 +75,8 @@ import {
   releaseChannel,
   releaseUrl,
   renderImagesScript,
+  repoAliases,
+  repoFullName,
   repoReader,
   repoReadProblem,
   resolveDistBase,
@@ -75,6 +86,7 @@ import {
   tarEntries,
   templateVersion,
   testEnv,
+  uploadTarget,
   validateBridgeRuntime,
   validateConfig,
   validateHarnesses,
@@ -138,14 +150,14 @@ const rel = (over: Partial<IndexRelease>): IndexRelease => ({
   manifestDigest: `sha256:${"c".repeat(64)}`,
   manifestUrl: null,
   skillsDigest: null,
-  image: `ghcr.io/martin-atrin/${repo}@sha256:${"a".repeat(64)}`,
+  image: `ghcr.io/tealbrick/${repo}@sha256:${"a".repeat(64)}`,
   artifact: null,
   source: null,
   runtime: null,
   minOs: null,
   notarized: null,
   upgradeFrom: "*",
-  repo: `Martin-Atrin/${repo}`,
+  repo: `Tealbrick/${repo}`,
   commit: "abc",
   tag: "v0.1.0",
   publishedAt: "2026-10-11T00:00:00.000Z",
@@ -180,14 +192,14 @@ test("index merge: add, idempotent re-add, immutable content, desktop kind, offe
   const i1 = mergeIndex(null, [rel({})], [], "t1");
   assert.equal(i1.schema, "opt2.release-index/v2");
   assert.equal(mergeIndex(i1, [rel({ id: "rel_other" })], [], "t2").releases.length, 1);
-  assert.throws(() => mergeIndex(i1, [rel({ image: `ghcr.io/martin-atrin/${repo}@sha256:${"b".repeat(64)}` })], [], "t"), /immutable/);
+  assert.throws(() => mergeIndex(i1, [rel({ image: `ghcr.io/tealbrick/${repo}@sha256:${"b".repeat(64)}` })], [], "t"), /immutable/);
   const desk = rel({ product: "tbd", kind: "desktop", image: null, manifestDigest: null, artifact: { url: "https://x", sha256: `sha256:${"d".repeat(64)}` } });
   const i2 = mergeIndex(i1, [desk, rel({ product: "bridge", kind: "bridge", manifestDigest: null, runtime: brt })], [], "t3");
   assert.deepEqual(
     i2.releases.map((r) => r.product),
     ["bridge", "knowledge", "tbd"],
   );
-  const src = { repo: "Martin-Atrin/opt2-tealbrick-bridge", ref: "f".repeat(40), dockerfile: "Dockerfile" };
+  const src = { repo: "Tealbrick/opt2-tealbrick-bridge", ref: "f".repeat(40), dockerfile: "Dockerfile" };
   assert.throws(() => mergeIndex(null, [rel({ image: null, source: src })], [], "t"), /stable release needs an image/);
   assert.equal(mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null, source: src })], [], "t").releases.length, 1);
   assert.throws(() => mergeIndex(null, [rel({ version: "0.1.0-dev.1", channel: "dev", image: null })], [], "t"), /image or source/);
@@ -253,7 +265,7 @@ test("images script: check builds every image, never pushes, no credentials", ()
 });
 
 test("dependency rules: v1 names rejected, @opt2-tealbrick only via workspace or release URL", () => {
-  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz";
+  const url = "https://github.com/Tealbrick/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz";
   const [errs, urls] = checkDependencies(
     {
       dependencies: { "@opt2-tealbrick/manifest": url, "@opt2-tealbrick/spec": "0.1.0", tealbrick: "1.0.0", zod: "^4" },
@@ -281,7 +293,7 @@ test("workspace globs and package tags", () => {
   assert.equal(tarballName("create-tealbrick-miniapp", "0.1.0"), "create-tealbrick-miniapp-0.1.0.tgz");
   assert.equal(
     releaseUrl("opt2-tealbrick-sdk", "manifest", "@opt2-tealbrick/manifest", "0.1.0"),
-    "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz",
+    "https://github.com/Tealbrick/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz",
   );
 });
 
@@ -334,39 +346,46 @@ test("the committed registry/harnesses.json is valid and has a claude-code row (
 
 test("GTP-01: a product is signed only from its bound repo and kind (fires on a foreign repo, quiet on its own)", () => {
   const b = validateProducts({
-    bridge: { repo: "Martin-Atrin/opt2-tealbrick-bridge", kind: "bridge" },
-    knowledge: { repo: `Martin-Atrin/${repo}`, kind: "app" },
+    bridge: { repo: "Tealbrick/opt2-tealbrick-bridge", kind: "bridge" },
+    knowledge: { repo: `Tealbrick/${repo}`, kind: "app" },
   });
   // quiet on good
-  assert.equal(productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Martin-Atrin/opt2-tealbrick-bridge" }), null);
+  assert.equal(productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Tealbrick/opt2-tealbrick-bridge" }), null);
   assert.equal(mergeIndex(null, [rel({})], [], "t", [], b).releases.length, 1, "knowledge from its own repo is signed");
   // fire on bad: a samples tag declaring product "bridge" (the review's attack), a kind change, an unknown product
   assert.match(
-    productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Martin-Atrin/opt2-tealbrick-samples" }) ?? "",
-    /bound to Martin-Atrin\/opt2-tealbrick-bridge/,
+    productBindingProblem(b, { product: "bridge", kind: "bridge", repo: "Tealbrick/opt2-tealbrick-samples" }) ?? "",
+    /bound to Tealbrick\/opt2-tealbrick-bridge/,
   );
-  assert.match(productBindingProblem(b, { product: "knowledge", kind: "bridge", repo: `Martin-Atrin/${repo}` }) ?? "", /bound as kind app/);
-  assert.match(productBindingProblem(b, { product: "newapp", kind: "app", repo: `Martin-Atrin/${repo}` }) ?? "", /not bound/);
-  assert.match(productBindingProblem(b, { product: "constructor", kind: "app", repo: `Martin-Atrin/${repo}` }) ?? "", /not bound/, "no prototype keys");
-  const evil = rel({ product: "bridge", kind: "bridge", version: "99.0.0", manifestDigest: null, runtime: brt, repo: "Martin-Atrin/opt2-tealbrick-samples" });
+  assert.match(productBindingProblem(b, { product: "knowledge", kind: "bridge", repo: `Tealbrick/${repo}` }) ?? "", /bound as kind app/);
+  assert.match(productBindingProblem(b, { product: "newapp", kind: "app", repo: `Tealbrick/${repo}` }) ?? "", /not bound/);
+  assert.match(productBindingProblem(b, { product: "constructor", kind: "app", repo: `Tealbrick/${repo}` }) ?? "", /not bound/, "no prototype keys");
+  const evil = rel({ product: "bridge", kind: "bridge", version: "99.0.0", manifestDigest: null, runtime: brt, repo: "Tealbrick/opt2-tealbrick-samples" });
   assert.throws(() => mergeIndex(null, [evil], [], "t", [], b), /GTP-01/);
   // without the map, the index still refuses a repo change for a product that already has releases
   const i1 = mergeIndex(
     null,
-    [rel({ product: "bridge", kind: "bridge", manifestDigest: null, runtime: brt, repo: "Martin-Atrin/opt2-tealbrick-bridge" })],
+    [rel({ product: "bridge", kind: "bridge", manifestDigest: null, runtime: brt, repo: "Tealbrick/opt2-tealbrick-bridge" })],
     [],
     "t",
   );
-  assert.throws(() => mergeIndex(i1, [evil], [], "t2"), /earlier releases of bridge come from Martin-Atrin\/opt2-tealbrick-bridge/);
+  assert.throws(() => mergeIndex(i1, [evil], [], "t2"), /earlier releases of bridge come from Tealbrick\/opt2-tealbrick-bridge/);
   assert.throws(() => validateProducts({ bridge: { repo: "evil/opt2-tealbrick-bridge", kind: "bridge" } }), /repo must be/);
-  assert.throws(() => validateProducts({ bridge: { repo: "Martin-Atrin/opt2-tealbrick-bridge", kind: "lib" } }), /kind must be/);
+  assert.throws(() => validateProducts({ bridge: { repo: "Tealbrick/opt2-tealbrick-bridge", kind: "lib" } }), /kind must be/);
 });
 
 test("GTP-01: the committed registry/products.json binds every product of the committed index to the repo it came from", () => {
   const b = loadProductBindings();
   const index = JSON.parse(readFileSync(new URL("../registry/index.json", import.meta.url), "utf8")) as { releases: IndexRelease[] };
-  for (const r of index.releases) assert.equal(productBindingProblem(b, r), null, `${r.product}@${r.version}`);
-  assert.equal(b.bridge?.repo, "Martin-Atrin/opt2-tealbrick-bridge");
+  // C206: entries signed before the org move carry the legacy repo string; the binding's formerRepos covers exactly that
+  for (const r of index.releases) {
+    const bound = b[r.product];
+    assert.ok(bound, `${r.product} is bound`);
+    assert.equal(bound.kind, r.kind, `${r.product}@${r.version} kind`);
+    assert.ok(repoAliases(bound).includes(r.repo), `${r.product}@${r.version}: ${r.repo} is ${bound.repo} or one of its formerRepos`);
+  }
+  assert.equal(b.bridge?.repo, "Tealbrick/opt2-tealbrick-bridge");
+  assert.deepEqual(b.bridge?.formerRepos, ["Martin-Atrin/opt2-tealbrick-bridge"]);
 });
 
 test("C42: VOLUME instruction detection", () => {
@@ -423,7 +442,7 @@ test("ci-v9.1: point-release template refs compare as major.minor", () => {
 });
 
 test("S3: lockfile tarball integrity detection", () => {
-  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
+  const url = "https://github.com/Tealbrick/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
   const pnpm = `packages:\n  '@opt2-tealbrick/manifest@${url}':\n    resolution: {tarball: ${url}}\n    version: 0.1.3\n  ajv@8.17.1:\n    resolution: {integrity: sha512-abc}\n`;
   assert.deepEqual(lockfileTarballs(pnpm, "pnpm"), [{ url, integrity: null }]);
   const pnpmInt = pnpm.replace(`{tarball: ${url}}`, `{integrity: sha512-xyz, tarball: ${url}}`);
@@ -448,19 +467,19 @@ test("SEC-03: image provenance check binds image to repo + commit", async () => 
       if (s.includes("/blobs/")) return new Response(JSON.stringify({ config: { Labels: labels } }));
       return new Response("", { status: 404 });
     }) as typeof fetch;
-  const ref = `ghcr.io/martin-atrin/${repo}-gbrain@sha256:${"a".repeat(64)}`;
-  const good = { "org.opencontainers.image.revision": commit, "org.opencontainers.image.source": `https://github.com/Martin-Atrin/${repo}` };
-  assert.equal(await verifyImageProvenance(ref, `Martin-Atrin/${repo}`, commit, fake(good)), null);
+  const ref = `ghcr.io/tealbrick/${repo}-gbrain@sha256:${"a".repeat(64)}`;
+  const good = { "org.opencontainers.image.revision": commit, "org.opencontainers.image.source": `https://github.com/Tealbrick/${repo}` };
+  assert.equal(await verifyImageProvenance(ref, `Tealbrick/${repo}`, commit, fake(good)), null);
   assert.match(
-    String(await verifyImageProvenance(ref, `Martin-Atrin/${repo}`, commit, fake({ ...good, "org.opencontainers.image.revision": "d".repeat(40) }))),
+    String(await verifyImageProvenance(ref, `Tealbrick/${repo}`, commit, fake({ ...good, "org.opencontainers.image.revision": "d".repeat(40) }))),
     /revision label/,
   );
-  assert.match(String(await verifyImageProvenance(ref, "Martin-Atrin/opt2-tealbrick-connect", commit, fake(good))), /does not belong/);
-  assert.match(String(await verifyImageProvenance("ghcr.io/evil/x@sha256:1", `Martin-Atrin/${repo}`, commit, fake(good))), /bad image ref/);
+  assert.match(String(await verifyImageProvenance(ref, "Tealbrick/opt2-tealbrick-connect", commit, fake(good))), /does not belong/);
+  assert.match(String(await verifyImageProvenance("ghcr.io/evil/x@sha256:1", `Tealbrick/${repo}`, commit, fake(good))), /bad image ref/);
 });
 
 test("C62: pnpm lockfile integrity is written into tarball resolutions", () => {
-  const url = "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
+  const url = "https://github.com/Tealbrick/opt2-tealbrick-sdk/releases/download/manifest-v0.1.3/opt2-tealbrick-manifest-0.1.3.tgz";
   const lock = `  '@opt2-tealbrick/manifest@${url}':\n    resolution: {tarball: ${url}}\n  ajv@8.17.1:\n    resolution: {integrity: sha512-abc}\n`;
   const { text, changed } = addPnpmIntegrity(lock, () => "sha512-XYZ=");
   assert.equal(changed, 1);
@@ -789,7 +808,7 @@ test("ci-v9.4: DEV_ONLY_PRODUCTS is one list; the signer indexes them on dev onl
   assert.equal(releaseChannel("sample-gate-pro", "1.0.0"), "stable", "exact ids only");
   // merge: a dev sample release is indexed, a stable one is refused (whatever path built it)
   const sample = (channel: "dev" | "stable") =>
-    rel({ product: "sample-pay", version: "0.1.2", channel, tag: "v0.1.2", repo: "Martin-Atrin/opt2-tealbrick-samples" });
+    rel({ product: "sample-pay", version: "0.1.2", channel, tag: "v0.1.2", repo: "Tealbrick/opt2-tealbrick-samples" });
   const merged = mergeIndex(null, [sample("dev")], [], "2026-10-13T00:00:00.000Z");
   assert.deepEqual(
     merged.releases.map((r) => `${r.product}@${r.version}@${r.channel}`),
@@ -874,8 +893,8 @@ test("C113: devOnly mark + re-classification of an old stable record; identical 
   const sample = (over: Partial<IndexRelease>) =>
     rel({
       product: "sample-gate",
-      repo: "Martin-Atrin/opt2-tealbrick-samples",
-      image: `ghcr.io/martin-atrin/opt2-tealbrick-samples-sample-gate@sha256:${"1".repeat(64)}`,
+      repo: "Tealbrick/opt2-tealbrick-samples",
+      image: `ghcr.io/tealbrick/opt2-tealbrick-samples-sample-gate@sha256:${"1".repeat(64)}`,
       ...over,
     });
   const oldStable = sample({ id: "rel_01M4QCJ7T3NP5WQ2WWP5V1G7KY", version: "0.1.1", channel: "stable", publishedAt: "2026-10-11T00:00:00.000Z" });
@@ -965,7 +984,7 @@ test("ci-v9.6 distBaseUrl: absent = unchanged GitHub default; only platform dist
 });
 
 test("ci-v9.6 releaseUrl: default unchanged, dist base gives <base>/<repo>-<tag>/<file>", () => {
-  const github = "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz";
+  const github = "https://github.com/Tealbrick/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz";
   assert.equal(releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0"), github);
   assert.equal(releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", null), github);
   const dist = releaseUrl(cliRepo, "relay", "@opt2-tealbrick/relay", "0.1.0", distBase);
@@ -1012,7 +1031,7 @@ test("ci-v9.6 lockfile integrity covers dist tarballs (pnpm pin and npm read)", 
 });
 
 test("ci-v9.6 registry-add-desktop: GitHub asset URL as before, or a dist file with --repo", () => {
-  assert.deepEqual(artifactSource("https://github.com/Martin-Atrin/opt2-tealbrick-tbd/releases/download/v1.2.3/TBD-1.2.3.dmg"), {
+  assert.deepEqual(artifactSource("https://github.com/Tealbrick/opt2-tealbrick-tbd/releases/download/v1.2.3/TBD-1.2.3.dmg"), {
     repo: "opt2-tealbrick-tbd",
     tag: "v1.2.3",
   });
@@ -1111,9 +1130,9 @@ test("ci-v9.6 pre-release step: no-op without checks, passes a good gate, fails 
 test("ci-v9.6 template: pre-release step after gen; image-check and release-record wait for it; workflow runs the checks on the tag", () => {
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   assert.equal(stepScript(tpl, "pre-release"), "node .tb-ci/tb-ci.ts pre-release");
-  assert.match(tpl.split("\n")[0] as string, /ci-v9\.7/, "current template (ci-v9.7 keeps the ci-v9.6 pre-release step)");
+  assert.match(tpl.split("\n")[0] as string, /ci-v9\.8/, "current template (ci-v9.8 keeps the ci-v9.6 pre-release step)");
   const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
-  assert.match(wf, /TB_CI_REF: ci-v9\.7/);
+  assert.match(wf, /TB_CI_REF: ci-v9\.8/);
   const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
   const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root)") > 0, "gh-build runs the checks on the tag");
@@ -1129,20 +1148,25 @@ test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo
   for (const r of PENDING_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is pending but not an opt2 repo`);
   assert.deepEqual([...PENDING_REPOS], [], "every opt2 repo exists; any 404 is an alarm (private repos: see PRIVATE_REPOS)");
   for (const r of PRIVATE_REPOS) assert.ok(OPT2_REPOS.includes(r), `${r} is private but not an opt2 repo`);
-  assert.deepEqual([...PRIVATE_REPOS].sort(), ["opt2-tealbrick-bridge", "opt2-tealbrick-cli", "opt2-tealbrick-portal-core"], "C154/C173");
+  assert.deepEqual(
+    [...PRIVATE_REPOS].sort(),
+    ["bridge", "cli", "fleet", "packages", "portal-core", "portal-gui", "qa", "sdk", "specs", "tbd", "website"].map((n) => `opt2-tealbrick-${n}`),
+    "C154/C173 + C206/C208 (private in the org; samples stays public)",
+  );
   const activate = readFileSync(new URL("../ops/woodpecker-activate.ts", import.meta.url), "utf8");
   const listed = /const REPOS = \[([\s\S]*?)\]\.map/.exec(activate)?.[1] ?? "";
   const names = [...listed.matchAll(/"([a-z-]+)"/g)].map((m) => `opt2-tealbrick-${m[1]}`);
   assert.deepEqual(names, OPT2_REPOS, "ops/woodpecker-activate.ts lists the same repos as OPT2_REPOS, in the same order");
   // the CLI ships package tarballs (kind library, no images); release-index products: `cli` (C174) + kind package relay/harness-* (C181)
   const products = JSON.parse(readFileSync(new URL("../registry/products.json", import.meta.url), "utf8")) as Record<string, { repo: string; kind: string }>;
+  const former = [`Martin-Atrin/${cliRepo}`];
   assert.deepEqual(
     Object.entries(products).filter(([, p]) => p.repo.endsWith(`/${cliRepo}`)),
     [
-      ["cli", { repo: `Martin-Atrin/${cliRepo}`, kind: "cli" }],
-      ["harness-claude", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
-      ["harness-eve", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
-      ["relay", { repo: `Martin-Atrin/${cliRepo}`, kind: "package" }],
+      ["cli", { repo: `Tealbrick/${cliRepo}`, kind: "cli", formerRepos: former }],
+      ["harness-claude", { repo: `Tealbrick/${cliRepo}`, kind: "package", formerRepos: former }],
+      ["harness-eve", { repo: `Tealbrick/${cliRepo}`, kind: "package", formerRepos: former }],
+      ["relay", { repo: `Tealbrick/${cliRepo}`, kind: "package", formerRepos: former }],
     ],
   );
   assert.ok(!Object.values(products).some((p) => p.repo.endsWith("/opt2-tealbrick-sdk")));
@@ -1178,9 +1202,9 @@ test("C174: cli entry shape from a fixture release (dist URL, sha256 + sha512 in
   assert.equal(r.product, "cli");
   assert.equal(r.channel, "stable");
   assert.equal(r.tag, "cli-v0.2.0");
-  assert.equal(r.repo, `Martin-Atrin/${CLI_REPO}`);
+  assert.equal(r.repo, `Tealbrick/${CLI_REPO}`);
   assert.deepEqual(r.artifact, {
-    url: "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz",
+    url: "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz",
     sha256: `sha256:${f.sums.sha256}`,
     integrity: f.sums.integrity,
   });
@@ -1209,7 +1233,7 @@ test("C174: cli entries are refused for a private URL, bad digest formats, missi
   const bad = (artifact: unknown, re: RegExp, extra: Partial<IndexRelease> = {}) =>
     assert.match(cliEntryProblem({ ...r, artifact: artifact as IndexRelease["artifact"], ...extra }) ?? "OK", re);
   bad(
-    { ...art, url: "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz" },
+    { ...art, url: "https://github.com/Tealbrick/opt2-tealbrick-cli/releases/download/cli-v0.2.0/opt2-tealbrick-cli-0.2.0.tgz" },
     /never a private GitHub URL/,
   );
   bad({ ...art, url: "https://evil.example/opt2-tealbrick-cli-0.2.0.tgz" }, /dist host/);
@@ -1221,7 +1245,7 @@ test("C174: cli entries are refused for a private URL, bad digest formats, missi
   bad({ ...art, integrity: "sha512-short==" }, /sha512-/);
   bad({ ...art, size: 1 }, /unknown field/);
   bad(null, /needs artifact/);
-  bad(art, /only the artifact/, { image: `ghcr.io/martin-atrin/x@sha256:${"a".repeat(64)}` });
+  bad(art, /only the artifact/, { image: `ghcr.io/tealbrick/x@sha256:${"a".repeat(64)}` });
   bad(art, /desktop fields/, { notarized: true });
   // mergeIndex enforces the same rules, keeps the entry immutable, and existing kinds are unchanged
   const i1 = mergeIndex(null, [rel({}), r], [], "t1", [], loadProductBindings());
@@ -1234,7 +1258,7 @@ test("C174: cli entries are refused for a private URL, bad digest formats, missi
   assert.throws(() => mergeIndex(i1, [{ ...r, artifact: { ...art, url: cliTarballUrl("0.2.0", "https://releases.tealbrick.com") } }], [], "t"), /immutable/);
   assert.throws(() => mergeIndex(null, [{ ...r, artifact: { url: art.url, sha256: art.sha256 } }], [], "t"), /integrity/);
   assert.throws(() => mergeIndex(null, [{ ...r, kind: "plugin" as IndexRelease["kind"] }], [], "t"), /unknown kind/);
-  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Martin-Atrin/opt2-tealbrick-bridge" }], [], "t", [], loadProductBindings()), /GTP-01/);
+  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Tealbrick/opt2-tealbrick-bridge" }], [], "t", [], loadProductBindings()), /GTP-01/);
   assert.throws(() => mergeIndex(null, [{ ...r, kind: "desktop" }], [], "t", [], loadProductBindings()), /bound as kind cli/);
 });
 
@@ -1281,7 +1305,7 @@ function fakeCliGitHub(opts: {
     const headers = (init?.headers ?? {}) as Record<string, string>;
     calls.push({ url, auth: Boolean(headers.authorization) });
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-    const base = "https://api.github.com/repos/Martin-Atrin/opt2-tealbrick-cli";
+    const base = "https://api.github.com/repos/Tealbrick/opt2-tealbrick-cli";
     if (url === `${base}/tags?per_page=100`)
       return opts.tagsStatus && opts.tagsStatus !== 200
         ? json(opts.tagsStatus, { message: "Not Found" })
@@ -1334,7 +1358,7 @@ test("C174: cli source with the token builds the entry from a fixture release; p
   assert.equal(e.commit, CLI_SHA);
   assert.ok(known.has("cli@0.2.0@stable"));
   assert.ok(
-    gh.calls.every((c) => c.url.startsWith("https://api.github.com/repos/Martin-Atrin/opt2-tealbrick-cli/") && c.auth),
+    gh.calls.every((c) => c.url.startsWith("https://api.github.com/repos/Tealbrick/opt2-tealbrick-cli/") && c.auth),
     "token only to the CLI repo API",
   );
   assert.equal(new Set(gh.calls.filter((c) => c.url.includes("/releases/assets/")).map((c) => c.url)).size, 3, "tgz + .sha256 + .integrity downloaded");
@@ -1430,22 +1454,22 @@ test("C154: private repos are read with TB_PRIVATE_READ_TOKEN only; public repos
   for (const repo of PRIVATE_REPOS) {
     const rd = repoReader(repo, env, fetcher);
     assert.equal(rd.via, "read-token");
-    await rd.api(`/repos/Martin-Atrin/${repo}/tags?per_page=50`);
+    await rd.api(`/repos/Tealbrick/${repo}/tags?per_page=50`);
     await rd.file("packages/bridge-server/bridge-runtime.json", "f".repeat(40));
   }
   for (const c of calls) {
     assert.equal(c.auth, "Bearer readonly", "a private repo never gets the platform GITHUB_TOKEN");
-    assert.ok(c.url.startsWith("https://api.github.com/repos/Martin-Atrin/"), "the read token goes to api.github.com only");
+    assert.ok(c.url.startsWith("https://api.github.com/repos/Tealbrick/"), "the read token goes to api.github.com only");
   }
   assert.ok(calls.some((c) => c.url.includes("/contents/packages/bridge-server/bridge-runtime.json?ref=") && c.accept === "application/vnd.github.raw+json"));
   calls.length = 0;
   const pub = repoReader("opt2-tealbrick-knowledge", env, fetcher);
   assert.equal(pub.via, "github-token");
-  await pub.api("/repos/Martin-Atrin/opt2-tealbrick-knowledge/tags?per_page=50");
+  await pub.api("/repos/Tealbrick/opt2-tealbrick-knowledge/tags?per_page=50");
   await pub.file("tealbrick-ci.json", "main");
   assert.equal(calls[0]?.auth, "Bearer platform", "public repos: REST with GITHUB_TOKEN as before");
   assert.deepEqual(calls[1], {
-    url: "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-knowledge/main/tealbrick-ci.json",
+    url: "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-knowledge/main/tealbrick-ci.json",
     auth: undefined,
     accept: undefined,
   });
@@ -1505,7 +1529,7 @@ test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sh
   assert.equal(r.tag, "relay-v0.1.0");
   assert.equal(
     r.artifact?.url,
-    "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+    "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
   );
   assert.equal(r.artifact?.url, distTarballUrl("relay", "0.1.0"));
   assert.equal(distEntryProblem(r), null);
@@ -1519,7 +1543,7 @@ test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sh
   assert.match(
     distEntryProblem({
       ...r,
-      artifact: { ...art, url: "https://github.com/Martin-Atrin/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz" },
+      artifact: { ...art, url: "https://github.com/Tealbrick/opt2-tealbrick-cli/releases/download/relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz" },
     }) ?? "",
     /dist host/,
   );
@@ -1532,17 +1556,177 @@ test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sh
   assert.equal(DIST_PRODUCTS.cli?.bin, "tealbrick");
   // products.json binds every dist product to the CLI repo with its kind; mergeIndex accepts it and keeps it immutable
   const bindings = loadProductBindings();
-  for (const [product, d] of Object.entries(DIST_PRODUCTS)) assert.deepEqual(bindings[product], { repo: `Martin-Atrin/${CLI_REPO}`, kind: d.kind }, product);
+  for (const [product, d] of Object.entries(DIST_PRODUCTS))
+    assert.deepEqual(bindings[product], { repo: `Tealbrick/${CLI_REPO}`, kind: d.kind, formerRepos: [`Martin-Atrin/${CLI_REPO}`] }, product);
   const i1 = mergeIndex(null, [r], [], "t", [], bindings);
   assert.equal(i1.releases.length, 1);
   assert.throws(
     () => mergeIndex(i1, [{ ...r, artifact: { ...art, url: distTarballUrl("relay", "0.1.0", "https://releases.tealbrick.com") } }], [], "t"),
     /immutable/,
   );
-  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Martin-Atrin/opt2-tealbrick-bridge" }], [], "t", [], bindings), /GTP-01/);
+  assert.throws(() => mergeIndex(null, [{ ...r, repo: "Tealbrick/opt2-tealbrick-bridge" }], [], "t", [], bindings), /GTP-01/);
   // the source picks relay-v* releases up next to cli-v* (harness-claude without a release yet: pending)
   const gh = fakeCliGitHub({ release: "ok", relay: true });
   const out = await cliSourceReleases({ token: "tok", known: new Set(), fetcher: gh.fetcher, now: () => "2026-10-15T00:00:00.000Z" });
   assert.deepEqual(out.rejected, []);
   assert.deepEqual(out.add.map((x) => `${x.kind}:${x.product}@${x.version}`).sort(), ["cli:cli@0.2.0", "package:relay@0.1.0"]);
+});
+
+test("C206 ci-v9.8: owner Tealbrick, legacy Martin-Atrin accepted on read only; writes follow GITHUB_REPOSITORY", () => {
+  assert.equal(OWNER, "Tealbrick");
+  assert.deepEqual([...LEGACY_OWNERS], ["Martin-Atrin"]);
+  assert.deepEqual([...KNOWN_OWNERS], ["Tealbrick", "Martin-Atrin"]);
+  assert.equal(IMAGE_NAMESPACE, "ghcr.io/tealbrick");
+  assert.equal(imageNamespace("Martin-Atrin"), "ghcr.io/martin-atrin");
+  assert.deepEqual([...IMAGE_NAMESPACES], ["ghcr.io/tealbrick", "ghcr.io/martin-atrin"]);
+  // writes: the Actions repo wins; elsewhere OWNER; a foreign owner is refused
+  assert.equal(repoFullName(repo, {}), `Tealbrick/${repo}`);
+  assert.equal(repoFullName(repo, { GITHUB_REPOSITORY: `Tealbrick/${repo}` }), `Tealbrick/${repo}`);
+  assert.equal(repoFullName(repo, { GITHUB_REPOSITORY: `Martin-Atrin/${repo}` }), `Martin-Atrin/${repo}`);
+  assert.equal(repoFullName(repo, { GITHUB_REPOSITORY: "Tealbrick/opt2-tealbrick-connect" }), `Tealbrick/${repo}`, "another repo's Action: OWNER");
+  assert.throws(() => repoFullName(repo, { GITHUB_REPOSITORY: `evil/${repo}` }), /not an opt2 owner/);
+  // reads: both owners for pins and desktop artifacts; new URLs carry OWNER
+  const pin = (o: string) => `https://github.com/${o}/opt2-tealbrick-sdk/releases/download/manifest-v0.1.12/opt2-tealbrick-manifest-0.1.12.tgz`;
+  assert.ok(isReleaseTarballUrl(pin("Martin-Atrin")) && isReleaseTarballUrl(pin("Tealbrick")));
+  assert.ok(!isReleaseTarballUrl(pin("evil")));
+  assert.ok(checkDependencies({ dependencies: { "@opt2-tealbrick/manifest": pin("Martin-Atrin") } }, "x", new Set())[0].length === 0, "old pins stay valid");
+  assert.ok(checkDependencies({ dependencies: { "@opt2-tealbrick/manifest": pin("evil") } }, "x", new Set())[0].length === 1);
+  assert.equal(releaseUrl("opt2-tealbrick-sdk", "manifest", "@opt2-tealbrick/manifest", "0.1.12"), pin("Tealbrick"));
+  const spec = (o: string) => `https://github.com/${o}/opt2-tealbrick-specs/releases/download/spec-v0.1.20/opt2-tealbrick-spec-0.1.20.tgz`;
+  assert.ok(isSpecTarballUrl(spec("Martin-Atrin")) && isSpecTarballUrl(spec("Tealbrick")) && !isSpecTarballUrl(spec("evil")));
+  assert.ok(isSpecTarballUrl(`${DIST_BASES[0]}/opt2-tealbrick-specs-spec-v0.1.20/opt2-tealbrick-spec-0.1.20.tgz`), "B6: spec on the dist host");
+  assert.ok(!isSpecTarballUrl(`${DIST_BASES[0]}/opt2-tealbrick-specs-spec-v0.1.20/opt2-tealbrick-spec-0.1.21.tgz`), "version must match");
+  assert.deepEqual(artifactSource("https://github.com/Martin-Atrin/opt2-tealbrick-tbd/releases/download/v1.2.3/TBD.zip"), {
+    repo: "opt2-tealbrick-tbd",
+    tag: "v1.2.3",
+  });
+  assert.throws(() => artifactSource("https://github.com/evil/opt2-tealbrick-tbd/releases/download/v1.2.3/TBD.zip"));
+  // dist: the org dist repo is the first base; the old user-account dist base is gone (nothing was ever pinned to it)
+  assert.equal(DIST_BASES[0], "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download");
+  assert.equal(CLI_DIST_BASE, DIST_BASES[0]);
+  assert.ok(!DIST_BASES.some((b) => b.includes("Martin-Atrin")));
+  // harness icons: both owners
+  const h = (icon: string) => [
+    { id: "test-harness", label: "X", kind: "other", authorise: "url", noAgentPath: false, icon, instructions: [{ title: "Open", detail: "Open it." }] },
+  ];
+  for (const o of KNOWN_OWNERS) assert.doesNotThrow(() => validateHarnesses(h(`https://raw.githubusercontent.com/${o}/opt2-tealbrick-platform/main/i.svg`)), o);
+  assert.throws(() => validateHarnesses(h("https://raw.githubusercontent.com/evil/opt2-tealbrick-platform/main/i.svg")), /icon/);
+});
+
+test("C206: products.json formerRepos = same repo name under a legacy owner; GTP-01 treats it as the same repo for EARLIER releases only", () => {
+  const ok = { bridge: { repo: "Tealbrick/opt2-tealbrick-bridge", kind: "bridge", formerRepos: ["Martin-Atrin/opt2-tealbrick-bridge"] } };
+  const b = validateProducts(ok);
+  assert.deepEqual(repoAliases(b.bridge as NonNullable<typeof b.bridge>), ["Tealbrick/opt2-tealbrick-bridge", "Martin-Atrin/opt2-tealbrick-bridge"]);
+  assert.throws(
+    () => validateProducts({ bridge: { ...ok.bridge, formerRepos: ["Martin-Atrin/opt2-tealbrick-samples"] } }),
+    /formerRepos/,
+    "never another repo",
+  );
+  assert.throws(() => validateProducts({ bridge: { ...ok.bridge, formerRepos: ["evil/opt2-tealbrick-bridge"] } }), /formerRepos/);
+  assert.throws(() => validateProducts({ bridge: { ...ok.bridge, formerRepos: [] } }), /formerRepos/);
+  assert.throws(
+    () => validateProducts({ bridge: { ...ok.bridge, formerRepos: ["Martin-Atrin/opt2-tealbrick-bridge", "Martin-Atrin/opt2-tealbrick-bridge"] } }),
+    /formerRepos/,
+  );
+  assert.throws(() => validateProducts({ bridge: { ...ok.bridge, other: 1 } }), /fields must be exactly/);
+  assert.throws(
+    () => validateProducts({ bridge: { repo: "Martin-Atrin/opt2-tealbrick-bridge", kind: "bridge" } }),
+    /repo must be Tealbrick/,
+    "the binding names the org repo",
+  );
+  const old = rel({ product: "bridge", kind: "bridge", version: "0.1.29", manifestDigest: null, runtime: brt, repo: "Martin-Atrin/opt2-tealbrick-bridge" });
+  const i0 = mergeIndex(null, [old], [], "t"); // signed before the move (no binding check then)
+  const next = rel({ product: "bridge", kind: "bridge", version: "0.1.30", manifestDigest: null, runtime: brt, repo: "Tealbrick/opt2-tealbrick-bridge" });
+  assert.equal(mergeIndex(i0, [next], [], "t2", [], b).releases.length, 2, "first org release after the move is accepted");
+  assert.throws(() => mergeIndex(i0, [next], [], "t2"), /GTP-01/, "without the binding the repo change is still refused");
+  const legacyNew = rel({ ...next, version: "0.1.31", repo: "Martin-Atrin/opt2-tealbrick-bridge" });
+  assert.throws(() => mergeIndex(i0, [legacyNew], [], "t2", [], b), /GTP-01/, "a NEW release must carry the bound repo, not the former one");
+  const evil = rel({ ...next, version: "0.1.32", repo: "Tealbrick/opt2-tealbrick-samples" });
+  assert.throws(() => mergeIndex(i0, [evil], [], "t2", [], b), /GTP-01/);
+});
+
+test("C206: image provenance accepts the org namespace and, for tags pushed before the move, the legacy namespace + label (same repo)", async () => {
+  const commit = "c".repeat(40);
+  const fake = (labels: Record<string, string>): typeof fetch =>
+    (async (u: string | URL | Request) => {
+      const s = String(u);
+      if (s.includes("/token?")) return new Response(JSON.stringify({ token: "t" }));
+      if (s.includes("/manifests/")) return new Response(JSON.stringify({ config: { digest: `sha256:${"e".repeat(64)}` } }));
+      if (s.includes("/blobs/")) return new Response(JSON.stringify({ config: { Labels: labels } }));
+      return new Response("", { status: 404 });
+    }) as typeof fetch;
+  const label = (o: string) => ({ "org.opencontainers.image.revision": commit, "org.opencontainers.image.source": `https://github.com/${o}/${repo}` });
+  const img = (ns: string) => `${ns}/${repo}@sha256:${"a".repeat(64)}`;
+  assert.equal(await verifyImageProvenance(img("ghcr.io/tealbrick"), `Tealbrick/${repo}`, commit, fake(label("Tealbrick"))), null);
+  assert.equal(await verifyImageProvenance(img("ghcr.io/martin-atrin"), `Tealbrick/${repo}`, commit, fake(label("Martin-Atrin"))), null);
+  assert.match(String(await verifyImageProvenance(img("ghcr.io/evil"), `Tealbrick/${repo}`, commit, fake(label("Tealbrick")))), /bad image ref/);
+  assert.match(String(await verifyImageProvenance(img("ghcr.io/tealbrick"), `Tealbrick/${repo}`, commit, fake(label("evil")))), /source label/);
+  assert.match(
+    String(
+      await verifyImageProvenance(
+        img("ghcr.io/tealbrick"),
+        `Tealbrick/${repo}`,
+        commit,
+        fake({ ...label("Tealbrick"), "org.opencontainers.image.source": "https://github.com/Martin-Atrin/opt2-tealbrick-connect" }),
+      ),
+    ),
+    /source label/,
+    "legacy label must name the same repo",
+  );
+});
+
+test("C206: ghcrFind looks in ghcr.io/tealbrick first, then the legacy namespace", async () => {
+  const seen: string[] = [];
+  const fetcher = (has: string) =>
+    (async (u: string | URL | Request) => {
+      const s = String(u);
+      seen.push(s);
+      if (s.includes("/token?")) return new Response(JSON.stringify({ token: "t" }));
+      if (s.includes(`/v2/${has}/`)) return new Response(null, { status: 200, headers: { "docker-content-digest": `sha256:${"f".repeat(64)}` } });
+      return new Response(null, { status: 404 });
+    }) as typeof fetch;
+  assert.equal(await ghcrFind(repo, "0.1.0", fetcher("tealbrick")), `ghcr.io/tealbrick/${repo}@sha256:${"f".repeat(64)}`);
+  assert.equal(await ghcrFind(repo, "0.1.0", fetcher("martin-atrin")), `ghcr.io/martin-atrin/${repo}@sha256:${"f".repeat(64)}`);
+  assert.equal(await ghcrFind(repo, "0.1.0", fetcher("nobody")), null);
+  assert.ok(seen.some((u) => u.includes("scope=repository:tealbrick/")));
+});
+
+test("C206 B0 probe: uploads go to the release's upload_url (uploads.github.com does not follow a transfer)", () => {
+  assert.deepEqual(uploadTarget("https://uploads.github.com/repos/Tealbrick/opt2-tealbrick-platform/releases/42/assets{?name,label}", "index.json"), {
+    host: "uploads.github.com",
+    path: "/repos/Tealbrick/opt2-tealbrick-platform/releases/42/assets?name=index.json",
+  });
+  assert.equal(
+    uploadTarget("https://uploads.github.com/repos/T/r/releases/1/assets{?name,label}", "a b.tgz").path,
+    "/repos/T/r/releases/1/assets?name=a%20b.tgz",
+  );
+  for (const bad of [
+    "https://evil.example/repos/T/r/releases/1/assets{?name,label}",
+    "http://uploads.github.com/repos/T/r/releases/1/assets{?name,label}",
+    "https://uploads.github.com/repos/T/r/releases/1/other",
+    "https://uploads.github.com/repos/T/r/releases/1/assets?name=x",
+    "not a url",
+  ])
+    assert.throws(() => uploadTarget(bad, "x"), /upload_url/, bad);
+  // the runner never builds an uploads.github.com path itself any more
+  const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  assert.ok(!/host: "uploads\.github\.com"/.test(runner), "no hand-built upload host");
+  assert.ok(!/\/repos\/\$\{OWNER\}\/\$\{repo\}\/releases/.test(runner), "release writes go through repoFullName");
+});
+
+test("C206 ci-v9.8 templates: runner + template from Tealbrick; pre-move manifest/spec pins kept until B6", () => {
+  const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
+  for (const t of [tpl, wf]) {
+    assert.match(t, /GENERATED from Tealbrick\/opt2-tealbrick-platform/);
+    assert.match(t, /raw\.githubusercontent\.com\/Tealbrick\/opt2-tealbrick-platform\/\$TB_CI_REF\/ci\/tb-ci\.ts/);
+    assert.ok(!/raw\.githubusercontent\.com\/Martin-Atrin/.test(t));
+  }
+  assert.ok(!wf.includes("ghcr.io/martin-atrin"));
+  const schema = JSON.parse(readFileSync(new URL("./tealbrick-ci.schema.json", import.meta.url), "utf8")) as {
+    $id: string;
+    properties: { distBaseUrl: { enum: string[] } };
+  };
+  assert.match(schema.$id, /^https:\/\/raw\.githubusercontent\.com\/Tealbrick\//);
+  assert.deepEqual(schema.properties.distBaseUrl.enum, [...DIST_BASES], "schema enum == DIST_BASES");
 });

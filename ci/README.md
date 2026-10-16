@@ -33,7 +33,7 @@ Paths without `package.json` skip the node stages with a warning (fresh scaffold
 Every releasing repo (images, miniapp kit, or package tarballs) carries `.github/workflows/opt2-release.yml`, a byte-identical copy of `ci/github/opt2-release.yml` (setup fails on drift; `adopt` writes it). It runs on `v*` and `<pkg>-v*` tags only:
 1. `build` job — `permissions: contents: read`. Fetches the hash-checked runner, then `tb-ci gh-build`: `docker build` each declared image from the tagged commit with OCI labels (source, revision, version) and saves it to a tarball; builds the miniapp kit (`tb-gen kit --build`), or for a package tag installs, BUILDS (root `build` script, else `pnpm --filter <pkg>... run --if-present build`) and packs the tagged workspace package (`npm pack --ignore-scripts`). Installs use `--frozen-lockfile --ignore-scripts`. No write token exists in this job.
    - Pack guard (ci-v9.1, C75): after `npm pack` the runner reads the tarball and fails if any `main`, `module`, `types`/`typings`, `bin` or `exports` target of the packed `package.json` is missing (for example no `dist/`). ci-v9 packed without a build, so `<pkg>-v*` tarballs released by the ci-v9 workflow can lack `dist/`; re-release them from ci-v9.1.
-2. `publish` job — `permissions: packages: write, contents: write`, built-in `GITHUB_TOKEN`. Runs NO repo code: loads the image tarballs, pushes `ghcr.io/martin-atrin/<image>:<version>` and `:sha-<commit>`, prints the digest (information only), attaches kit/package tarballs + `.sha256` to the GitHub release.
+2. `publish` job — `permissions: packages: write, contents: write`, built-in `GITHUB_TOKEN`. Runs NO repo code: loads the image tarballs, pushes `ghcr.io/<owner>/<image>:<version>` and `:sha-<commit>` (ci-v9.8, C206: `ghcr.io/tealbrick`; a new package is private after its first push, so an org owner makes it public once — the signer reads packages anonymously), prints the digest (information only), attaches kit/package tarballs + `.sha256` to the GitHub release.
 Actions are pinned by full commit SHA and limited to the official actions/checkout, setup-node, upload-artifact and download-artifact. Woodpecker keeps every other stage and holds no secrets.
 
 ## Release signing (SEC-03, C72)
@@ -54,7 +54,7 @@ Dev-only products (ci-v9.4): `DEV_ONLY_PRODUCTS` in `ci/tb-ci.ts` (one list: `sa
 ## Package rules (enforced by setup)
 - Every `package.json` (root and workspace packages) has `"private": true` and no `publishConfig` (no npm publishing in opt2).
 - Dependencies on `@opt2-tealbrick/*` are either `workspace:*` (package in the same repo) or a GitHub release tarball URL, which setup checks exists:
-  `"@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz"`. A registry version string fails.
+  `"@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz"` (pins made before C206 name the old owner Martin-Atrin; they stay valid). A registry version string fails.
 - v1 package names (`tealbrick`, `@tealbrick/*`) fail the build.
 - A committed lockfile. With pnpm: `"packageManager": "pnpm@<version>"` (CI uses corepack on Node 24).
 - Root scripts: `typecheck`, `lint`, `test`; plus `conformance` for miniapps and the bridge; plus `gen` (`tb-gen all`, with `gen/` git-ignored) for miniapps; plus `build` in multi-package repos (`pnpm-workspace.yaml`, packages under `packages/<name>/`, shipped compiled as `dist/`). Recommended: `tsc --noEmit`, `biome check .`, `node --test`.
@@ -90,8 +90,8 @@ Apps with companion services (BSA-01): one `kind: "app"` image plus one `kind: "
 ```
 
 ## Dist host for the assets of private repos (ci-v9.6, C154/C157)
-A repo that goes private cannot serve its release tarballs from github.com to anonymous consumers. Such a repo sets `"distBaseUrl"` in `tealbrick-ci.json` (or the env `TB_DIST_BASE_URL`, which wins). Only the hosts in `DIST_BASES` (`ci/tb-ci.ts`) are accepted: the assets-only public repo `https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download` now, `https://releases.tealbrick.com` for prod. Add a host by platform PR only.
-- Layout on a dist host: `<base>/<repo>-<release tag>/<file>`, one path segment. Example: `https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz` (`.sha256` and `.integrity` sit next to it).
+A repo that goes private cannot serve its release tarballs from github.com to anonymous consumers. Such a repo sets `"distBaseUrl"` in `tealbrick-ci.json` (or the env `TB_DIST_BASE_URL`, which wins). Only the hosts in `DIST_BASES` (`ci/tb-ci.ts`) are accepted: the assets-only public repo `https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download` (C206), `https://releases.tealbrick.com` for prod. Add a host by platform PR only.
+- Layout on a dist host: `<base>/<repo>-<release tag>/<file>`, one path segment. Example: `https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz` (`.sha256` and `.integrity` sit next to it).
 - Release time: `package-pack` rewrites `workspace:` deps to dist URLs instead of the repo's github.com URLs, and checks the dist file exists (so publish the dependency to the dist host before tagging a package that needs it). Without `distBaseUrl` nothing changes.
 - Consumers: `setup` accepts a dist URL for `@opt2-tealbrick/*` dependencies (next to the github.com release URL). `pin-tarballs` and the lockfile integrity check cover dist tarballs; the lockfile `integrity` (sha512) is what pins the bytes, whichever host serves them.
 - Registry index: `registry-add-desktop --url <dist file> --repo opt2-tealbrick-<name> --sha256 …` (the dist URL is `<base>/<repo>-<tag>/<file>`); the index keeps `artifact.sha256`, which the command downloads and checks. App images stay in public GHCR and need no dist host.
@@ -105,11 +105,20 @@ Tag `<dir>-v<semver>` where `<dir>` is the folder name under `packages/` and `<s
 (e.g. `manifest-v0.1.0`). The release workflow installs, runs the build, rewrites in-repo `workspace:` deps to their release URLs
 (they must be released first), runs `npm pack`, checks the tarball with the pack guard, and attaches `<name>-<version>.tgz` + `.sha256` to the GitHub release.
 Local check before tagging (same path as the Action, no token): `CI_WORKSPACE=$PWD CI_REPO_NAME=<repo> CI_COMMIT_TAG=<dir>-v<ver> CI_COMMIT_SHA=$(git rev-parse HEAD) node <platform>/ci/tb-ci.ts gh-build`, then inspect `.tb-ci/out/assets/*.tgz`.
-Asset URL: `https://github.com/Martin-Atrin/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`). With `distBaseUrl` the dependency URLs written into the packed tarball point at the dist host instead (see above).
+Asset URL: `https://github.com/Tealbrick/<repo>/releases/download/<dir>-v<ver>/<scope-name>-<ver>.tgz` (`@opt2-tealbrick/x` -> `opt2-tealbrick-x-<ver>.tgz`). With `distBaseUrl` the dependency URLs written into the packed tarball point at the dist host instead (see above).
 
 ## App releases
 Tag `v<semver>` (no build metadata). Channel from the version: `1.2.3` stable, `-rc.N`/`-beta.N` beta, anything else (`-dev.N`, `-alpha.N`) dev.
 Releases are immutable: the same version with another image digest is rejected. See `registry/README.md`.
+
+## Org move (ci-v9.8, C206)
+The opt2 repos moved from the user account `Martin-Atrin` to the org `Tealbrick` (GitHub transfer; names unchanged). `OWNER` in `ci/tb-ci.ts` is `Tealbrick`; `LEGACY_OWNERS` (`Martin-Atrin`) is accepted only where existing data is READ.
+- Writes: release create/upload and the registry commit go to `GITHUB_REPOSITORY` in Actions (else `OWNER/<repo>`). Uploads use the release's own `upload_url`: a B0 probe showed `uploads.github.com` answers an old-owner path with 307 and no Location (API writes to the old path work through a 307).
+- Images: `ghcr.io/<lowercased owner>`; org releases push to `ghcr.io/tealbrick` (private on the first push: an org owner makes each new package public once). Old `ghcr.io/martin-atrin` packages stay (every signed digest before the move points there): never delete or privatise them. The signer looks for a tag's image in `ghcr.io/tealbrick` first, then the legacy namespace, and accepts a legacy source label for the same repo name.
+- `registry/products.json`: `repo` = `Tealbrick/<repo>`, `formerRepos` = `["Martin-Atrin/<same repo>"]`. GTP-01 treats the two as one repo for earlier releases; a NEW release must carry `repo`.
+- Accepted on read: old-owner tarball pins (lockfiles, `TB_MANIFEST_PKG`, `TB_SPEC_PKG`), desktop artifact URLs, harness icons. `TB_MANIFEST_PKG`/`TB_SPEC_PKG` may also be dist-host URLs (C206 B6).
+- `PRIVATE_REPOS` lists every repo that is private in the org (C206/C208); each needs the read token.
+- Never create a repo named `Martin-Atrin/opt2-tealbrick-*` again: it deletes GitHub's redirects, which old index entries (`manifestUrl`), TBD builds and lockfiles rely on.
 
 ## Secrets (C72)
 - Woodpecker: NONE (no org, repo or global secret). `node ops/woodpecker-activate.ts` deletes any it finds.
