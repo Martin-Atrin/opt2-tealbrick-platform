@@ -69,14 +69,14 @@ test("parseSet: previous must be the set before", () => {
   assert.throws(() => parseSet(base({ apps: [] })), /non-empty/);
 });
 
-test("planSteps: fixed order core → gui → website; running SHA is skipped", () => {
+test("planSteps: fixed order core → gui → website; running SHA is skipped (set without admin-gui)", () => {
   const s = parseSet(base());
   const steps = planSteps(s, { "portal-core": sha("a"), "portal-gui": sha("9"), website: null });
   assert.deepEqual(
     steps.map((x) => x.service),
-    [...ORDER],
+    ["portal-core", "portal-gui", "website"],
   );
-  assert.deepEqual(ORDER, ["portal-core", "portal-gui", "website"]);
+  assert.deepEqual(ORDER, ["portal-core", "admin-gui", "portal-gui", "website"]);
   assert.deepEqual(
     steps.map((x) => x.skip),
     [true, false, false],
@@ -89,7 +89,34 @@ test("planSteps: fixed order core → gui → website; running SHA is skipped", 
   );
 });
 
-test("ciGreen: only the Woodpecker push context counts", () => {
+test("planSteps: a set with adminGui deploys core → admin-gui → gui → website", () => {
+  const s = parseSet(base({ adminGui: { repo: "opt2-tealbrick-admin", sha: sha("e") } }));
+  const steps = planSteps(s, { "admin-gui": sha("e") });
+  assert.deepEqual(
+    steps.map((x) => `${x.service}:${x.skip}`),
+    ["portal-core:false", "admin-gui:true", "portal-gui:false", "website:false"],
+  );
+  assert.throws(() => parseSet(base({ adminGui: { repo: "admin", sha: "x" } })), /adminGui.repo[\s\S]*adminGui.sha/);
+});
+
+test("ciGreen: the newest Woodpecker ci result (push or manual) decides", () => {
+  assert.equal(
+    ciGreen([
+      { context: CI_CONTEXT, state: "failure", updated_at: "2026-10-16T17:07:53Z" },
+      { context: "ci/woodpecker/manual/ci", state: "success", updated_at: "2026-10-16T17:43:25Z" },
+    ]),
+    true,
+  );
+  assert.equal(
+    ciGreen([
+      { context: CI_CONTEXT, state: "failure", updated_at: "2026-10-16T18:00:00Z" },
+      { context: "ci/woodpecker/manual/ci", state: "success", updated_at: "2026-10-16T17:43:25Z" },
+    ]),
+    false,
+  );
+});
+
+test("ciGreen: only the Woodpecker ci contexts count", () => {
   assert.equal(ciGreen([{ context: CI_CONTEXT, state: "success" }]), true);
   assert.equal(ciGreen([{ context: CI_CONTEXT, state: "pending" }]), false);
   assert.equal(ciGreen([{ context: "other", state: "success" }]), false);
