@@ -1870,6 +1870,8 @@ test("C206 R2-1: legacy-owner manifestUrl / source.repo / desktop artifact.url a
   assert.match((await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":1}', false), okFetch)).join(";"), /source\.repo: commit/);
   const badFetch = (async () => new Response("other")) as typeof fetch;
   assert.match((await verifyOwnerRewrites(fakeM, [app, src, desk2], rw, reader('{"ok":1}'), badFetch)).join(";"), /artifact\.url: sha256/);
+});
+
 test("C206 R2-3: no internal machine / tailnet names in this public repo's tracked files", () => {
   const files = execFileSync("git", ["ls-files"], { cwd: new URL("..", import.meta.url), encoding: "utf8" })
     .split("\n")
