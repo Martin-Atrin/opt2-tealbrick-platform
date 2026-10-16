@@ -131,14 +131,18 @@ interface Want {
 }
 const WANT: Want[] = [];
 
-for (const owner of OWNERS) {
-  // C206: the Woodpecker org for an owner exists once one of its repos is active; a 404 means nothing to clean there
-  const org = await wp("GET", `/orgs/lookup/${owner}`);
-  if (org.status === 404) continue;
-  if (org.status !== 200) throw new Error(`org lookup ${owner} failed (HTTP ${org.status})`);
-  for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? []) as { name: string }[]) {
-    const d = await wp("DELETE", `/orgs/${org.json.id}/secrets/${sec.name}`);
-    console.log(`org ${owner} secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
+// C72: no org-level secrets in the opt2 Woodpecker org. ONLY the Martin-Atrin org (opt2 only). NEVER the Tealbrick org: it is
+// shared with the v1 repos and their own org secrets (C206 incident 2026-10-16: an earlier version of this loop deleted the
+// v1 Tealbrick org secrets registry_host/registry_username/registry_password).
+const CLEAN_ORG_SECRETS_OF = "Martin-Atrin";
+{
+  const org = await wp("GET", `/orgs/lookup/${CLEAN_ORG_SECRETS_OF}`);
+  if (org.status !== 200 && org.status !== 404) throw new Error(`org lookup ${CLEAN_ORG_SECRETS_OF} failed (HTTP ${org.status})`);
+  if (org.status === 200) {
+    for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? []) as { name: string }[]) {
+      const d = await wp("DELETE", `/orgs/${org.json.id}/secrets/${sec.name}`);
+      console.log(`org ${CLEAN_ORG_SECRETS_OF} secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
+    }
   }
 }
 const ids = new Map<string, number>();
