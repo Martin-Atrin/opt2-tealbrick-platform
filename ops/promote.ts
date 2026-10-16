@@ -1,10 +1,10 @@
 // C199: promote one frozen RELEASE SET to the `live` environment (PROD). The only way a set reaches live.
 //   node ops/promote.ts --set <dir>/RS-<n>.json [--dry-run] [--environment live]
-// 1. Reads and validates the set ({id, createdAt, notes, portalCore, portalGui, website, bridge, apps, cli, previous}).
+// 1. Reads and validates the set ({id, createdAt, notes, portalCore, adminGui?, portalGui, website, bridge, apps, cli, previous}).
 // 2. Verifies: every SHA has a green Woodpecker pipeline (GitHub commit status `ci/woodpecker/push/ci` = success); the
 //    bridge and every app version is a STABLE release in the published release index (with an image digest); the CLI
 //    version has a release in its repo (warning only: the CLI is not deployed by this script).
-// 3. Deploys in a fixed order — portal-core → portal-gui → website — with ops/railway-deploy.ts (pinned SHA, C141),
+// 3. Deploys in a fixed order — portal-core → admin-gui (when the set has one, RS-2+) → portal-gui → website — with ops/railway-deploy.ts (pinned SHA, C141),
 //    waits for Railway SUCCESS (Core's health check runs after its migrations, so SUCCESS = migrated + healthy), and
 //    smoke-tests after each step. A service already running the set's SHA is skipped, unless --repoint (C206): then every
 //    service is redeployed at the set's SHA from its CURRENT GitHub source (railway-deploy sets source = OWNER/<repo>), so a
@@ -24,6 +24,8 @@ export const PROJECT = "15297ce5-0283-4901-a408-9c802e6ac53a"; // Railway projec
 export const OWNER = "Tealbrick";
 export const INDEX_URL = `https://github.com/${OWNER}/opt2-tealbrick-platform/releases/download/registry/index.json`;
 export const CI_CONTEXT = "ci/woodpecker/push/ci";
+/** A manual Woodpecker run of the same commit (e.g. re-run after an infrastructure failure during the org move) counts too. */
+export const CI_CONTEXT_MANUAL = "ci/woodpecker/manual/ci";
 
 export interface RepoSha {
   repo: string;
@@ -34,6 +36,8 @@ export interface ReleaseSet {
   createdAt: string;
   notes: string;
   portalCore: RepoSha;
+  /** C203/C214: Tealbrick Admin GUI (optional: RS-1 has none) */
+  adminGui?: RepoSha;
   portalGui: RepoSha;
   website: RepoSha;
   bridge: { version: string };
@@ -56,8 +60,9 @@ export function parseSet(raw: unknown): ReleaseSet {
   if (!m) errs.push("id must be RS-<n>");
   if (typeof o.createdAt !== "string" || Number.isNaN(Date.parse(o.createdAt))) errs.push("createdAt must be an ISO date");
   if (typeof o.notes !== "string") errs.push("notes must be a string");
-  for (const k of ["portalCore", "portalGui", "website"] as const) {
+  for (const k of ["portalCore", "adminGui", "portalGui", "website"] as const) {
     const v = o[k] as RepoSha | undefined;
+    if (k === "adminGui" && v === undefined) continue;
     if (!v || !/^opt2-tealbrick-[a-z0-9-]+$/.test(String(v.repo))) errs.push(`${k}.repo must be opt2-tealbrick-<x>`);
     if (!v || !SHA.test(String(v.sha))) errs.push(`${k}.sha must be a full 40-hex SHA`);
   }
@@ -83,7 +88,7 @@ export function parseSet(raw: unknown): ReleaseSet {
   return { ...(o as unknown as ReleaseSet), previous: n > 1 ? (o.previous as string) : null };
 }
 
-export type ServiceName = "portal-core" | "portal-gui" | "website";
+export type ServiceName = "portal-core" | "admin-gui" | "portal-gui" | "website";
 export interface Step {
   service: ServiceName;
   repo: string;
@@ -92,24 +97,31 @@ export interface Step {
   skip: boolean;
 }
 
-/** Fixed order (C199): Core first (migrations), then the GUI gateway, then the website. */
-export const ORDER: readonly ServiceName[] = ["portal-core", "portal-gui", "website"];
+/** Fixed order (C199): Core first (migrations), then the Admin GUI (its gateway calls Core's admin routes), then the
+ *  customer GUI gateway, then the website. */
+export const ORDER: readonly ServiceName[] = ["portal-core", "admin-gui", "portal-gui", "website"];
+
+/** The repo + SHA of each service the set contains (admin-gui only when the set has it). */
+export function sourcesOf(set: ReleaseSet): Partial<Record<ServiceName, RepoSha>> {
+  return { "portal-core": set.portalCore, ...(set.adminGui ? { "admin-gui": set.adminGui } : {}), "portal-gui": set.portalGui, website: set.website };
+}
 
 /** `repoint` (C206): never skip, so every service is redeployed (and its Railway source re-set) at the set's SHA. */
 export function planSteps(set: ReleaseSet, running: Partial<Record<ServiceName, string | null>>, repoint = false): Step[] {
-  const src: Record<ServiceName, RepoSha> = { "portal-core": set.portalCore, "portal-gui": set.portalGui, website: set.website };
-  return ORDER.map((service) => ({
-    service,
-    repo: src[service].repo,
-    sha: src[service].sha,
-    skip: !repoint && running[service] === src[service].sha,
-  }));
+  const src = sourcesOf(set);
+  return ORDER.flatMap((service) => {
+    const v = src[service];
+    return v ? [{ service, repo: v.repo, sha: v.sha, skip: !repoint && running[service] === v.sha }] : [];
+  });
 }
 
-/** GitHub combined status → green when the Woodpecker push pipeline context is success. */
-export function ciGreen(statuses: { context: string; state: string }[]): boolean {
-  const ours = statuses.filter((s) => s.context === CI_CONTEXT);
-  return ours.length > 0 && ours[0]?.state === "success";
+/** GitHub combined status (latest status per context) → green when the NEWEST Woodpecker ci result of this commit, push
+ *  or manual, is success. A later failed run makes it red again; other contexts (conformance, …) do not decide. */
+export function ciGreen(statuses: { context: string; state: string; updated_at?: string; created_at?: string }[]): boolean {
+  const ours = statuses
+    .filter((s) => s.context === CI_CONTEXT || s.context === CI_CONTEXT_MANUAL)
+    .sort((a, b) => String(b.updated_at ?? b.created_at ?? "").localeCompare(String(a.updated_at ?? a.created_at ?? "")));
+  return ours[0]?.state === "success";
 }
 
 interface IndexRelease {
@@ -286,6 +298,12 @@ async function httpCheck(
 }
 
 async function smoke(ctx: Ctx, service: ServiceName): Promise<{ check: string; ok: boolean; detail: string }[]> {
+  if (service === "admin-gui") {
+    // Admin GUI: only /healthz (no anonymous admin page). No domain yet = Railway health check only.
+    const admin = await publicUrl(ctx, "admin-gui");
+    if (!admin) return [{ check: "admin-gui", ok: true, detail: "no admin-gui domain: Railway health check only" }];
+    return [await httpCheck("admin-gui /healthz 200", `${admin}/healthz`, (r) => r.status === 200)];
+  }
   const gui = await publicUrl(ctx, "portal-gui");
   if (service === "portal-core" || service === "portal-gui") {
     if (!gui) return [{ check: "gateway", ok: service === "portal-core", detail: "no portal-gui domain yet (Core: Railway health check only)" }];
@@ -334,12 +352,10 @@ async function main(): Promise<void> {
 
   // Checks (always, also in --dry-run).
   const problems: string[] = [];
-  for (const [k, v] of [
-    ["portal-core", set.portalCore],
-    ["portal-gui", set.portalGui],
-    ["website", set.website],
-  ] as const) {
-    const st = ghJson<{ statuses: { context: string; state: string }[] }>(`repos/${OWNER}/${v.repo}/commits/${v.sha}/status`);
+  for (const [k, v] of Object.entries(sourcesOf(set)) as [ServiceName, RepoSha][]) {
+    const st = ghJson<{ statuses: { context: string; state: string; updated_at?: string; created_at?: string }[] }>(
+      `repos/${OWNER}/${v.repo}/commits/${v.sha}/status`,
+    );
     const ok = !!st && ciGreen(st.statuses);
     console.log(`  CI ${k.padEnd(11)} ${v.repo}@${v.sha.slice(0, 7)}: ${ok ? "green" : "NOT green"}`);
     if (!ok) problems.push(`${k} ${v.sha.slice(0, 7)} has no green Woodpecker pipeline`);
