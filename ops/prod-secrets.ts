@@ -235,7 +235,10 @@ async function askHidden(prompt: string): Promise<string> {
     };
     const onData = (chunk: Buffer) => {
       // bracketed-paste markers from some terminals
-      const text = chunk.toString("utf8").replaceAll(`${String.fromCharCode(27)}[200~`, "").replaceAll(`${String.fromCharCode(27)}[201~`, "");
+      const text = chunk
+        .toString("utf8")
+        .replaceAll(`${String.fromCharCode(27)}[200~`, "")
+        .replaceAll(`${String.fromCharCode(27)}[201~`, "");
       for (const ch of text) {
         if (ch === "\r" || ch === "\n") return done(() => resolve(buf.trim()));
         if (ch === "\u0003") return done(() => reject(new Error("stopped (Ctrl+C); nothing was set yet")));
