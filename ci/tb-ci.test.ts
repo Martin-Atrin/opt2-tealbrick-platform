@@ -1807,3 +1807,21 @@ test("C206 B6: a legacy version without the .integrity asset is indexed with the
     /\.sha256 does not match/,
   );
 });
+
+test("C206 R2-3: no internal machine / tailnet names in this public repo's tracked files", () => {
+  const files = execFileSync("git", ["ls-files"], { cwd: new URL("..", import.meta.url), encoding: "utf8" })
+    .split("\n")
+    .filter(Boolean);
+  // built from parts so this test does not trip itself
+  const names = ["fo" + "xy", "ne" + "uu", "nuc" + "lab", "fed" + "-main"];
+  const re = new RegExp(`\\b(?:${names.join("|")})\\b|tail${"d"}[0-9a-f]{4,}|\\.ts${"."}net\\b`, "i");
+  const hits: string[] = [];
+  for (const f of files) {
+    if (/\.(png|jpg|jws|tgz)$/.test(f)) continue;
+    const text = readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
+    text.split("\n").forEach((line, i) => {
+      if (re.test(line)) hits.push(`${f}:${i + 1}`);
+    });
+  }
+  assert.deepEqual(hits, []);
+});
