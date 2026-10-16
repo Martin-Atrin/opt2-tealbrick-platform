@@ -149,10 +149,15 @@ export function checkIndex(set: ReleaseSet, releases: readonly IndexRelease[]): 
   return problems;
 }
 
+/** Index (app/bridge) problems block a promotion, except for a rollback, where they are warnings (apps are not deployed). */
+export function indexProblems(problems: readonly string[], rollback: boolean): { fatal: string[]; warnings: string[] } {
+  return rollback ? { fatal: [], warnings: [...problems] } : { fatal: [...problems], warnings: [] };
+}
+
 /** The rollback for a failed promotion: promote the previous set (or, for RS-1, remove the live deployments by hand). */
 export function rollbackCommand(set: ReleaseSet, setFile: string): string {
   if (!set.previous) return "no previous set (RS-1): Railway → live → <service> → Deployments → remove the failed deployment; live had nothing before";
-  return `node ops/promote.ts --set ${join(dirname(setFile), `${set.previous}.json`)}`;
+  return `node ops/promote.ts --rollback --set ${join(dirname(setFile), `${set.previous}.json`)}`;
 }
 
 export interface StepResult {
@@ -184,6 +189,9 @@ export interface Options {
   dryRun: boolean;
   /** C206: redeploy every service at the set's SHA from its current (org) source, even when it already runs that SHA */
   repoint: boolean;
+  /** --rollback: re-promote an older (immutable) set. Its app list may name versions that were delisted since (e.g. fleet,
+   *  C208); apps are never deployed here, so app/bridge index problems become warnings. Service SHAs and CI stay checked. */
+  rollback: boolean;
 }
 export function parseArgs(argv: readonly string[]): Options {
   const val = (f: string) => {
@@ -193,13 +201,14 @@ export function parseArgs(argv: readonly string[]): Options {
     if (!v || v.startsWith("--")) throw new Error(`${f} needs a value`);
     return v;
   };
-  for (const a of argv) if (a.startsWith("--") && !["--set", "--environment", "--dry-run", "--repoint"].includes(a)) throw new Error(`unknown option ${a}`);
+  for (const a of argv)
+    if (a.startsWith("--") && !["--set", "--environment", "--dry-run", "--repoint", "--rollback"].includes(a)) throw new Error(`unknown option ${a}`);
   const setFile = val("--set");
   if (!setFile) throw new Error("--set <dir>/RS-<n>.json is required");
   if (!SET_ID.test(basename(setFile, ".json"))) throw new Error("the set file must be named RS-<n>.json");
   const environment = val("--environment") ?? "live";
   if (environment === "production") throw new Error('refusing "production": that is DEV; deploy dev with ops/railway-deploy.ts');
-  return { setFile, environment, dryRun: argv.includes("--dry-run"), repoint: argv.includes("--repoint") };
+  return { setFile, environment, dryRun: argv.includes("--dry-run"), repoint: argv.includes("--repoint"), rollback: argv.includes("--rollback") };
 }
 
 // ---- side effects below (not unit-tested; exercised by --dry-run and the live run) ----
@@ -365,7 +374,9 @@ async function main(): Promise<void> {
   console.log(
     `  index ${index.generatedAt}: bridge ${set.bridge.version}, ${set.apps.map((a) => `${a.product} ${a.version}`).join(", ")}: ${ip.length ? "PROBLEMS" : "all stable with digests"}`,
   );
-  problems.push(...ip);
+  const ix = indexProblems(ip, opts.rollback);
+  for (const w of ix.warnings) console.log(`  WARNING (rollback): ${w}`);
+  problems.push(...ix.fatal);
   const cliRel = ghJson<{ tag_name: string }>(`repos/${OWNER}/${set.cli.repo ?? "opt2-tealbrick-bridge"}/releases/tags/cli-v${set.cli.version}`);
   console.log(`  cli ${set.cli.version}: ${cliRel ? "release exists" : `WARNING: no release cli-v${set.cli.version} visible (not deployed by this script)`}`);
   if (problems.length) throw new Error(`checks failed; nothing deployed:\n  - ${problems.join("\n  - ")}`);
