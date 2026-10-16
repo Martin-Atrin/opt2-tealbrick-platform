@@ -985,7 +985,7 @@ export const DIST_PRODUCTS: Readonly<Record<string, DistProduct>> = {
   "harness-claude": { kind: "package", packageName: "@opt2-tealbrick/harness-claude", tagDir: "harness-claude" },
   "harness-eve": { kind: "package", packageName: "@opt2-tealbrick/harness-eve", tagDir: "harness-eve" },
   // C206 B6: the libraries of the repos that go private (sdk, specs, packages) and the pre-split bridge-repo tarballs that
-  // TBD and Foxy still pin. Every consumer pins them by dist URL; the dist mirror copies the bytes (C164).
+  // TBD and an older CLI install still pin. Every consumer pins them by dist URL; the dist mirror copies the bytes (C164).
   spec: {
     kind: "package",
     packageName: "@opt2-tealbrick/spec",
