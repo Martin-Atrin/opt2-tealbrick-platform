@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/main/ci/tealbrick-ci.schema.json",
+  "$id": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/main/ci/tealbrick-ci.schema.json",
   "title": "tealbrick-ci.json (opt2 CI standard, repo settings)",
   "type": "object",
   "additionalProperties": false,
@@ -31,7 +31,7 @@
       "description": "ci-v9.1: start the ephemeral Postgres 17 step and set TB_TEST_DATABASE_URL for the unit step. Default false (no database step)."
     },
     "distBaseUrl": {
-      "enum": ["https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download", "https://releases.tealbrick.com"],
+      "enum": ["https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download", "https://releases.tealbrick.com"],
       "description": "ci-v9.6: public dist host for the release assets of a private repo. Package tarball URLs written at release time (workspace deps) and checked in consumers point at <base>/<repo>-<release tag>/<file>. Default (absent): GitHub releases of this repo. Env TB_DIST_BASE_URL overrides. Only the listed hosts are accepted."
     },
     "preReleaseChecks": {
@@ -61,7 +61,7 @@
           "name": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9-]*$",
-            "description": "Repo name or <repo>-<component>; published as ghcr.io/martin-atrin/<name>."
+            "description": "Repo name or <repo>-<component>; published as ghcr.io/<lowercased repo owner>/<name> (ci-v9.8: ghcr.io/tealbrick/<name>; releases before C206 are in ghcr.io/martin-atrin)."
           },
           "context": {
             "type": "string",

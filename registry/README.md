@@ -5,11 +5,13 @@ The release index tells Portal Core what it can deploy (apps, the bridge) and wh
 ## Files and URLs
 | What | Repo path | Public URL |
 |---|---|---|
-| Index body | `registry/index.json` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.json` (also raw on `main`) |
-| Signed envelope | `registry/index.jws` | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.jws` |
+| Index body | `registry/index.json` | `https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.json` (also raw on `main`) |
+| Signed envelope | `registry/index.jws` | `https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.jws` |
 | Offers (reviewed input) | `registry/offers.json` | change by PR only; the next publish carries them |
 | Harness options (reviewed input, C40) | `registry/harnesses.json` | change by PR only; the next publish carries them |
-| Public signing key | `registry/keys.json` (JWKS, Ed25519) | `https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/keys.json` (re-uploaded with every publish; D12/C30) and raw on `main`; Core pins it in config (`RELEASE_INDEX_PUBLIC_JWKS`) |
+| Public signing key | `registry/keys.json` (JWKS, Ed25519) | `https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/keys.json` (re-uploaded with every publish; D12/C30) and raw on `main`; Core pins it in config (`RELEASE_INDEX_PUBLIC_JWKS`) |
+
+C206 org move: the repo moved from `Martin-Atrin` to `Tealbrick`. The old URLs redirect (release downloads 301, raw served); clients should use the Tealbrick URLs. Entries signed before the move keep `repo: Martin-Atrin/…` and images in `ghcr.io/martin-atrin` (history is never rewritten); `products.json` `formerRepos` binds those to the same product.
 
 Caching: raw.githubusercontent.com serves `main` with up to ~5 min CDN lag, and release-asset downloads can also lag briefly after a publish. Core should poll the release-asset URLs and accept that a new release can take up to ~5 min to appear (the signature check makes a stale copy harmless, never wrong). Supersession: releases are never edited or withdrawn in place; Core deploys the newest version on the workspace's channel (a later version supersedes an earlier one by semver).
 
@@ -32,9 +34,9 @@ All crypto and canonical JSON come from `@opt2-tealbrick/manifest` (`verifyJws`,
     "id": "rel_01M4...", "product": "knowledge", "kind": "app", "version": "0.1.0", "channel": "stable",
     "manifestDigest": "sha256:<hex of JCS(manifest)>", "manifestUrl": "https://github.com/.../releases/download/v0.1.0/tealbrick.manifest.json",
     "skillsDigest": "sha256:<digest of the skills archive>",
-    "image": "ghcr.io/martin-atrin/opt2-tealbrick-knowledge@sha256:<hex>", "artifact": null, "source": null,
+    "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge@sha256:<hex>", "artifact": null, "source": null,
     "minOs": null, "notarized": null, "upgradeFrom": "*",
-    "repo": "Martin-Atrin/opt2-tealbrick-knowledge", "commit": "<sha>", "tag": "v0.1.0", "publishedAt": "..."
+    "repo": "Tealbrick/opt2-tealbrick-knowledge", "commit": "<sha>", "tag": "v0.1.0", "publishedAt": "..."
   }],
   "harnesses": [{ "id": "claude-desktop", "kind": "desktop", "label": "Claude Desktop", "icon": null, "authorise": "instruction_set", "noAgentPath": false,
                   "instructions": [{ "title": "Add a custom connector", "detail": "...", "copy": { "kind": "url", "value": "{{mcpUrl}}" } }] }],

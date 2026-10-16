@@ -29,9 +29,41 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
 
-export const OWNER = "Martin-Atrin";
+/** C206 (ci-v9.8): the GitHub org every opt2 repo lives in. New records, reads and writes use it. */
+export const OWNER = "Tealbrick";
+/** C206: owners the opt2 repos lived under before the org move. GitHub redirects their old paths (git, API reads and writes,
+ *  raw, release downloads; NOT uploads.github.com). Accepted ONLY where existing data is READ: signed index entries, lockfile
+ *  and pipeline pins, harness icons, products.json `formerRepos`, image labels/namespaces of releases tagged before the move.
+ *  Never written into a new record. Never create a repo under these owners again (it would delete GitHub's redirects). */
+export const LEGACY_OWNERS: readonly string[] = ["Martin-Atrin"];
+/** OWNER first, then LEGACY_OWNERS. */
+export const KNOWN_OWNERS: readonly string[] = [OWNER, ...LEGACY_OWNERS];
+/** Regex alternation of KNOWN_OWNERS (owner names hold no regex specials). */
+const OWNERS_RE = KNOWN_OWNERS.join("|");
 export const REGISTRY_HOST = "ghcr.io";
-export const IMAGE_NAMESPACE = "ghcr.io/martin-atrin";
+/** ci-v9.8: images live in ghcr.io/<lowercased owner of the repo that builds them> (the org GITHUB_TOKEN can push only there). */
+export function imageNamespace(owner: string = OWNER): string {
+  return `${REGISTRY_HOST}/${owner.toLowerCase()}`;
+}
+export const IMAGE_NAMESPACE = imageNamespace(OWNER);
+/** C206: namespaces an indexed image may come from. Old packages under ghcr.io/martin-atrin stay (they hold every signed digest
+ *  before the move; never delete or privatise them); releases from the org push to ghcr.io/tealbrick. */
+export const IMAGE_NAMESPACES: readonly string[] = KNOWN_OWNERS.map((o) => imageNamespace(o));
+/** ci-v9.8: owner/name of the repo a write goes to. In GitHub Actions GITHUB_REPOSITORY names the running repo (the workflow
+ *  token can write only there); elsewhere OWNER/<repo>. An owner outside KNOWN_OWNERS is refused. */
+export function repoFullName(repo: string, env: NodeJS.ProcessEnv = process.env): string {
+  const gr = env.GITHUB_REPOSITORY;
+  if (gr?.endsWith(`/${repo}`)) {
+    const owner = gr.slice(0, -(repo.length + 1));
+    if (!KNOWN_OWNERS.includes(owner)) throw new Error(`GITHUB_REPOSITORY ${gr}: owner ${owner} is not an opt2 owner (${KNOWN_OWNERS.join(", ")})`);
+    return gr;
+  }
+  return `${OWNER}/${repo}`;
+}
+/** C206: the repo strings one product binding stands for: the bound repo first, then its former names. */
+export function repoAliases(b: { repo: string; formerRepos?: readonly string[] }): string[] {
+  return [b.repo, ...(b.formerRepos ?? [])];
+}
 export const PLATFORM_REPO = "opt2-tealbrick-platform";
 export const INDEX_PATH = "registry/index.json";
 export const ENVELOPE_PATH = "registry/index.jws";
@@ -83,13 +115,27 @@ export const PENDING_REPOS: readonly string[] = [];
  *  with the platform GITHUB_TOKEN, which cannot see another private repo. Without that token they are read as before
  *  (GITHUB_TOKEN / anonymous), which works only while the repo is still public; after the flip an unreadable repo is a loud
  *  registry-sync rejection, never a silent skip. Change by platform PR only. */
-export const PRIVATE_REPOS: readonly string[] = ["opt2-tealbrick-portal-core", "opt2-tealbrick-bridge", "opt2-tealbrick-cli"];
+export const PRIVATE_REPOS: readonly string[] = [
+  "opt2-tealbrick-portal-core",
+  "opt2-tealbrick-bridge",
+  "opt2-tealbrick-cli",
+  // C206/C208 (ci-v9.8): every opt2 repo that is private in the Tealbrick org. Public: the 6 shipped apps, platform, dist
+  // (C181/C164) and samples (C208: example fixtures Core fetches anonymously). Each one needs the read token (tb-registry-read).
+  "opt2-tealbrick-portal-gui",
+  "opt2-tealbrick-website",
+  "opt2-tealbrick-sdk",
+  "opt2-tealbrick-specs",
+  "opt2-tealbrick-packages",
+  "opt2-tealbrick-tbd",
+  "opt2-tealbrick-qa",
+  "opt2-tealbrick-fleet",
+];
 /** ci-v9.6 (C154/C157): public download hosts for the release assets of private repos. A repo opts in with `distBaseUrl` in
  *  tealbrick-ci.json (or TB_DIST_BASE_URL); only these bases are accepted, so a config can never point dependencies at another host.
  *  The asset layout under a base is `<base>/<repo>-<release tag>/<file>` (one path segment, so a GitHub dist repo's release tag and a
  *  plain host path look the same). Change this list by platform PR only. */
 export const DIST_BASES: readonly string[] = [
-  "https://github.com/Martin-Atrin/opt2-tealbrick-dist/releases/download", // assets-only public repo (now)
+  "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download", // assets-only public repo (C206: org repo)
   "https://releases.tealbrick.com", // our own download address (prod)
 ];
 export const MIN_TEMPLATE_PATH = "ci/MIN_TEMPLATE";
@@ -482,7 +528,7 @@ export function artifactSource(url: string, repoArg?: string): { repo: string; t
     if (!m || !(m[1] as string).startsWith(`${repoArg}-`)) throw new Error(`a dist URL must look like ${base}/${repoArg}-<release tag>/<file>`);
     return { repo: repoArg, tag: (m[1] as string).slice(repoArg.length + 1) };
   }
-  const gh = /^https:\/\/github\.com\/Martin-Atrin\/(opt2-tealbrick-[a-z0-9-]+)\/releases\/download\/([^/]+)\/[^/]+$/.exec(url);
+  const gh = new RegExp(`^https://github\\.com/(?:${OWNERS_RE})/(opt2-tealbrick-[a-z0-9-]+)/releases/download/([^/]+)/[^/]+$`).exec(url); // C206: old owner URLs redirect
   if (gh) return { repo: gh[1] as string, tag: gh[2] as string };
   throw new Error("--url must be a GitHub release asset URL of an opt2 repo or a file on a platform dist host");
 }
@@ -569,11 +615,19 @@ export function checkPackageJson(pkg: Record<string, unknown>, cfg: CiConfig, wh
   return errors;
 }
 
-export const RELEASE_URL_RE =
-  /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-[a-z0-9-]+\/releases\/download\/[a-z0-9-]+-v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\/[a-z0-9-]+-\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\.tgz$/;
+/** C206 (ci-v9.8): either owner; pins made before the move keep the old owner (GitHub redirects the download, integrity is unchanged). */
+export const RELEASE_URL_RE = new RegExp(
+  `^https://github\\.com/(?:${OWNERS_RE})/opt2-tealbrick-[a-z0-9-]+/releases/download/[a-z0-9-]+-v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?/[a-z0-9-]+-\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?\\.tgz$`,
+);
 /** ci-v9.3: the exact spec tarball the manifest package is loaded with (pinned by sha512 next to it). */
-const SPEC_URL_RE =
-  /^https:\/\/github\.com\/Martin-Atrin\/opt2-tealbrick-specs\/releases\/download\/spec-v\d+\.\d+\.\d+\/opt2-tealbrick-spec-\d+\.\d+\.\d+\.tgz$/;
+const SPEC_URL_RE = new RegExp(
+  `^https://github\\.com/(?:${OWNERS_RE})/opt2-tealbrick-specs/releases/download/spec-v\\d+\\.\\d+\\.\\d+/opt2-tealbrick-spec-\\d+\\.\\d+\\.\\d+\\.tgz$`,
+);
+/** ci-v9.8 (C206 B6): the same spec tarball on a platform dist host (`<base>/opt2-tealbrick-specs-spec-v<ver>/…`). */
+const DIST_SPEC_TAIL_RE = /^opt2-tealbrick-specs-spec-v(\d+\.\d+\.\d+)\/opt2-tealbrick-spec-\1\.tgz$/;
+export function isSpecTarballUrl(v: string): boolean {
+  return SPEC_URL_RE.test(v) || DIST_BASES.some((b) => v.startsWith(`${b}/`) && DIST_SPEC_TAIL_RE.test(v.slice(b.length + 1)));
+}
 const DEP_FIELDS = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] as const;
 
 /** Dependency rules: no v1 names; @opt2-tealbrick/* only as workspace (same repo) or GitHub release tarball URL. Returns [errors, urls]. */
@@ -592,7 +646,7 @@ export function checkDependencies(pkg: Record<string, unknown>, where: string, l
         urls.push(v);
       } else {
         errors.push(
-          `${where}: ${field}.${name}: must be a GitHub release tarball URL (https://github.com/Martin-Atrin/opt2-tealbrick-<repo>/releases/download/<pkg>-v<ver>/<file>.tgz) or a tarball on a platform dist host (${DIST_BASES.join(" | ")}/<repo>-<pkg>-v<ver>/<file>.tgz), got ${JSON.stringify(v)}`,
+          `${where}: ${field}.${name}: must be a GitHub release tarball URL (https://github.com/${OWNER}/opt2-tealbrick-<repo>/releases/download/<pkg>-v<ver>/<file>.tgz) or a tarball on a platform dist host (${DIST_BASES.join(" | ")}/<repo>-<pkg>-v<ver>/<file>.tgz), got ${JSON.stringify(v)}`,
         );
       }
     }
@@ -749,24 +803,39 @@ export function testEnv(cfg: CiConfig, env: NodeJS.ProcessEnv): NodeJS.ProcessEn
 }
 
 export interface ProductBinding {
-  repo: string; // "Martin-Atrin/opt2-tealbrick-<name>"
+  repo: string; // "Tealbrick/opt2-tealbrick-<name>"
   kind: IndexRelease["kind"];
+  /** C206: the same repo under a LEGACY owner ("Martin-Atrin/opt2-tealbrick-<name>"). Only earlier, already signed releases may
+   *  carry it; a new release always carries `repo`. */
+  formerRepos?: string[];
 }
 export type ProductBindings = Record<string, ProductBinding>;
 
-/** GTP-01: registry/products.json = { "<product>": { "repo": "Martin-Atrin/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop"|"cli"|"package" } }. */
+/** GTP-01: registry/products.json = { "<product>": { "repo": "Tealbrick/opt2-tealbrick-<name>", "kind": "app"|"bridge"|"desktop"|"cli"|"package",
+ *  "formerRepos"?: ["Martin-Atrin/opt2-tealbrick-<same name>"] } }. */
 export function validateProducts(raw: unknown): ProductBindings {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("products.json must be an object { product: { repo, kind } }");
   const out: ProductBindings = {};
   for (const [product, v] of Object.entries(raw as Record<string, unknown>)) {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(product)) throw new Error(`products.json: bad product id ${product}`);
     const b = v as Record<string, unknown>;
-    if (!b || typeof b !== "object" || Object.keys(b).sort().join(",") !== "kind,repo")
-      throw new Error(`products.json ${product}: fields must be exactly repo, kind`);
+    const keys = b && typeof b === "object" ? Object.keys(b).sort().join(",") : "";
+    if (keys !== "kind,repo" && keys !== "formerRepos,kind,repo")
+      throw new Error(`products.json ${product}: fields must be exactly repo, kind (and optional formerRepos)`);
     if (typeof b.repo !== "string" || !new RegExp(`^${OWNER}/opt2-tealbrick-[a-z0-9-]+$`).test(b.repo))
       throw new Error(`products.json ${product}: repo must be ${OWNER}/opt2-tealbrick-<name>`);
     if (!(INDEX_KINDS as readonly string[]).includes(b.kind as string)) throw new Error(`products.json ${product}: kind must be ${INDEX_KINDS.join(", ")}`);
-    out[product] = { repo: b.repo, kind: b.kind as ProductBinding["kind"] };
+    const binding: ProductBinding = { repo: b.repo, kind: b.kind as ProductBinding["kind"] };
+    if (b.formerRepos !== undefined) {
+      // C206: only the same repo name under a legacy owner, so the alias can never bind another repo's history
+      const name = b.repo.slice(OWNER.length + 1);
+      const allowed = LEGACY_OWNERS.map((o) => `${o}/${name}`);
+      const f = b.formerRepos;
+      if (!Array.isArray(f) || f.length === 0 || f.some((x) => typeof x !== "string" || !allowed.includes(x)) || new Set(f).size !== f.length)
+        throw new Error(`products.json ${product}: formerRepos must be a non-empty list of ${allowed.join(" | ")} (same repo name, legacy owner)`);
+      binding.formerRepos = [...(f as string[])];
+    }
+    out[product] = binding;
   }
   return out;
 }
@@ -1049,7 +1118,9 @@ export function mergeIndex(
       const problem = productBindingProblem(bindings, r);
       if (problem) throw new Error(`${r.product}@${r.version}: ${problem}`);
     }
-    const earlier = releases.find((x) => x.product === r.product && x.repo !== r.repo);
+    // C206: with a binding, the bound repo and its formerRepos are ONE repo (renamed by the org move)
+    const same = bindings && Object.hasOwn(bindings, r.product) ? repoAliases(bindings[r.product] as ProductBinding) : [r.repo];
+    const earlier = releases.find((x) => x.product === r.product && x.repo !== r.repo && !(same.includes(x.repo) && same.includes(r.repo)));
     if (earlier)
       throw new Error(`${r.product}@${r.version}: earlier releases of ${r.product} come from ${earlier.repo}; a release from ${r.repo} is refused (GTP-01)`);
     const old = releases.find((x) => x.product === r.product && x.version === r.version && x.channel === r.channel);
@@ -1110,7 +1181,10 @@ export function validateHarnesses(raw: unknown): Harness[] {
     if (!["desktop", "agentic_system", "other"].includes(r.kind as string)) bad("kind desktop|agentic_system|other");
     if (!["device_approval", "instruction_set", "url"].includes(r.authorise as string)) bad("authorise device_approval|instruction_set|url");
     if (typeof r.noAgentPath !== "boolean") bad("noAgentPath boolean");
-    if (r.icon !== null && !(typeof r.icon === "string" && /^https:\/\/(github\.com|raw\.githubusercontent\.com)\/Martin-Atrin\/opt2-tealbrick-/.test(r.icon)))
+    if (
+      r.icon !== null &&
+      !(typeof r.icon === "string" && new RegExp(`^https://(github\\.com|raw\\.githubusercontent\\.com)/(?:${OWNERS_RE})/opt2-tealbrick-`).test(r.icon))
+    )
       bad("icon: opt2 GitHub URL or null");
     return r as unknown as Harness;
   });
@@ -1721,8 +1795,10 @@ async function cmdGhBuild(): Promise<void> {
       installAllPaths(cfg, root);
       runPreReleaseChecks(cfg, root);
     }
+    const full = repoFullName(repo); // C206: the repo this Action runs in; its owner's ghcr namespace is the only one it can push to
+    const ns = imageNamespace(full.split("/")[0]);
     for (const im of cfg.images) {
-      const ref = `${IMAGE_NAMESPACE}/${im.name}:${version}`;
+      const ref = `${ns}/${im.name}:${version}`;
       sh(
         "docker",
         [
@@ -1732,7 +1808,7 @@ async function cmdGhBuild(): Promise<void> {
           "-t",
           ref,
           "--label",
-          `org.opencontainers.image.source=https://github.com/${OWNER}/${repo}`,
+          `org.opencontainers.image.source=https://github.com/${full}`,
           "--label",
           `org.opencontainers.image.revision=${commit}`,
           "--label",
@@ -1810,14 +1886,15 @@ async function cmdGhPublish(): Promise<void> {
       input: token,
       stdio: ["pipe", "inherit", "inherit"],
     });
+    const ns = imageNamespace(repoFullName(repo).split("/")[0]); // C206: same namespace gh-build tagged the images with
     for (const im of plan.images) {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(im.name) || !(im.name === repo || im.name.startsWith(`${repo}-`))) fail(`image ${im.name} does not belong to ${repo}`);
       if (im.tar !== `images/${im.name}.tar`) fail(`unexpected tar path ${im.tar}`);
-      const ref = `${IMAGE_NAMESPACE}/${im.name}:${im.version}`;
+      const ref = `${ns}/${im.name}:${im.version}`;
       execFileSync("docker", ["load", "-i", join(out, im.tar)], { stdio: "inherit" });
-      execFileSync("docker", ["tag", ref, `${IMAGE_NAMESPACE}/${im.name}:sha-${commit}`], { stdio: "inherit" });
+      execFileSync("docker", ["tag", ref, `${ns}/${im.name}:sha-${commit}`], { stdio: "inherit" });
       execFileSync("docker", ["push", ref], { stdio: "inherit" });
-      execFileSync("docker", ["push", `${IMAGE_NAMESPACE}/${im.name}:sha-${commit}`], { stdio: "inherit" });
+      execFileSync("docker", ["push", `${ns}/${im.name}:sha-${commit}`], { stdio: "inherit" });
       const digest = execFileSync("docker", ["inspect", "--format", "{{index .RepoDigests 0}}", ref], { encoding: "utf8" }).trim();
       log(`pushed ${digest} (the platform signer re-resolves digests in ghcr; this line is information only)`);
     }
@@ -1825,13 +1902,13 @@ async function cmdGhPublish(): Promise<void> {
   }
   if (plan.assets.length) {
     const prerelease = /-v?\d+\.\d+\.\d+-/.test(tag) || /^v\d+\.\d+\.\d+-/.test(tag);
-    const releaseId = await ensureRelease(repo, tag, prerelease);
+    const rel = await ensureRelease(repo, tag, prerelease);
     for (const name of plan.assets) {
       if (!KIT_NAME_RE.test(name) && !PKG_NAME_RE.test(name)) fail(`unexpected asset name ${name}`);
       const data = readFileSync(join(out, "assets", name));
       const sums = assetChecksums(name, data);
-      await uploadFile(repo, releaseId, name, data, "application/gzip");
-      for (const f of sums.files) await uploadFile(repo, releaseId, f.name, Buffer.from(f.body), "text/plain");
+      await uploadFile(repo, rel, name, data, "application/gzip");
+      for (const f of sums.files) await uploadFile(repo, rel, f.name, Buffer.from(f.body), "text/plain");
       log(`attached ${name} (sha256 ${sums.sha256}, integrity ${sums.integrity})`);
     }
   }
@@ -1874,25 +1951,60 @@ async function gh(
   return { status: res.status, json };
 }
 
-async function ensureRelease(repo: string, tag: string, prerelease: boolean, target?: string): Promise<number> {
-  const got = await gh("GET", `/repos/${OWNER}/${repo}/releases/tags/${tag}`);
-  if (got.status === 200) return got.json.id as number;
-  const made = await gh("POST", `/repos/${OWNER}/${repo}/releases`, { tag_name: tag, name: tag, prerelease, ...(target ? { target_commitish: target } : {}) });
-  if (made.status !== 201) fail(`create release ${tag}: HTTP ${made.status}`);
-  return made.json.id as number;
+/** A GitHub release this runner attaches assets to. */
+export interface GhRelease {
+  id: number;
+  uploadUrl: string;
 }
 
-async function uploadAsset(repo: string, releaseId: number, name: string, data: string): Promise<void> {
-  const list = await gh("GET", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?per_page=100`);
-  for (const a of (list.json ?? []) as Array<{ id: number; name: string }>) {
-    if (a.name === name) await gh("DELETE", `/repos/${OWNER}/${repo}/releases/assets/${a.id}`);
+function ghRelease(json: { id?: unknown; upload_url?: unknown }): GhRelease {
+  if (typeof json?.id !== "number" || typeof json.upload_url !== "string") fail("GitHub release answer has no id/upload_url");
+  return { id: json.id, uploadUrl: json.upload_url };
+}
+
+/** ci-v9.8 (C206): writes go to repoFullName(repo) (GITHUB_REPOSITORY in Actions). */
+async function ensureRelease(repo: string, tag: string, prerelease: boolean, target?: string): Promise<GhRelease> {
+  const full = repoFullName(repo);
+  const got = await gh("GET", `/repos/${full}/releases/tags/${tag}`);
+  if (got.status === 200) return ghRelease(got.json);
+  const made = await gh("POST", `/repos/${full}/releases`, { tag_name: tag, name: tag, prerelease, ...(target ? { target_commitish: target } : {}) });
+  if (made.status !== 201) fail(`create release ${tag}: HTTP ${made.status}`);
+  return ghRelease(made.json);
+}
+
+/** ci-v9.8 (C206 B0 probe): uploads.github.com does NOT follow a repo transfer (an old-owner path answers 307 without a
+ *  Location), so the upload goes to the release's own `upload_url`, which always names the current owner. */
+export function uploadTarget(uploadUrl: string, name: string): { host: string; path: string } {
+  let u: URL;
+  try {
+    u = new URL(uploadUrl.replace(/\{[^}]*\}$/, ""));
+  } catch {
+    throw new Error(`unexpected release upload_url ${JSON.stringify(uploadUrl)}`);
   }
-  const up = await gh("POST", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`, undefined, {
-    host: "uploads.github.com",
-    contentType: "application/json",
-    raw: data,
-  });
+  if (u.protocol !== "https:" || u.host !== "uploads.github.com" || u.search || !/^\/repos\/[^/]+\/[^/]+\/releases\/\d+\/assets$/.test(u.pathname))
+    throw new Error(`unexpected release upload_url ${JSON.stringify(uploadUrl)}`);
+  return { host: u.host, path: `${u.pathname}?name=${encodeURIComponent(name)}` };
+}
+
+/** Replaces asset `name` on the release (delete the old one, then upload). */
+async function putAsset(repo: string, rel: GhRelease, name: string, data: string | Buffer, contentType: string): Promise<void> {
+  const full = repoFullName(repo);
+  const list = await gh("GET", `/repos/${full}/releases/${rel.id}/assets?per_page=100`);
+  for (const a of (list.json ?? []) as Array<{ id: number; name: string }>) {
+    if (a.name === name) await gh("DELETE", `/repos/${full}/releases/assets/${a.id}`);
+  }
+  let target: { host: string; path: string };
+  try {
+    target = uploadTarget(rel.uploadUrl, name);
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  const up = await gh("POST", target.path, undefined, { host: target.host, contentType, raw: data });
   if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
+}
+
+async function uploadAsset(repo: string, rel: GhRelease, name: string, data: string): Promise<void> {
+  await putAsset(repo, rel, name, data, "application/json");
 }
 
 /** ci-v9.3: the lockfile npm wrote for the release-record packages must hold exactly the pinned integrity of both tarballs. */
@@ -1913,7 +2025,8 @@ export async function loadManifestPkg(root: string): Promise<ManifestPkg> {
   } else {
     const url = process.env.TB_MANIFEST_PKG;
     const want = process.env.TB_MANIFEST_INTEGRITY;
-    if (!url || !RELEASE_URL_RE.test(url)) fail("TB_MANIFEST_PKG must be the @opt2-tealbrick/manifest GitHub release tarball URL");
+    if (!url || !isReleaseTarballUrl(url))
+      fail("TB_MANIFEST_PKG must be the @opt2-tealbrick/manifest release tarball URL (GitHub release or a platform dist host)");
     if (!want || !/^sha512-[A-Za-z0-9+/]+=*$/.test(want)) fail("TB_MANIFEST_INTEGRITY (sha512-…) is required with TB_MANIFEST_PKG (C62)");
     const res = await fetch(url, { redirect: "follow" });
     if (!res.ok) fail(`TB_MANIFEST_PKG: HTTP ${res.status}`);
@@ -1924,7 +2037,8 @@ export async function loadManifestPkg(root: string): Promise<ManifestPkg> {
     // package use exactly that file. The lockfile npm writes is read back, so a different spec or manifest can never load.
     const specUrl = process.env.TB_SPEC_PKG;
     const specWant = process.env.TB_SPEC_INTEGRITY;
-    if (!specUrl || !SPEC_URL_RE.test(specUrl)) fail("TB_SPEC_PKG must be the @opt2-tealbrick/spec GitHub release tarball URL (ci-v9.3)");
+    if (!specUrl || !isSpecTarballUrl(specUrl))
+      fail("TB_SPEC_PKG must be the @opt2-tealbrick/spec release tarball URL (GitHub release or a platform dist host; ci-v9.3)");
     if (!specWant || !/^sha512-[A-Za-z0-9+/]+=*$/.test(specWant)) fail("TB_SPEC_INTEGRITY (sha512-…) is required with TB_SPEC_PKG (ci-v9.3)");
     const specRes = await fetch(specUrl, { redirect: "follow" });
     if (!specRes.ok) fail(`TB_SPEC_PKG: HTTP ${specRes.status}`);
@@ -1965,7 +2079,7 @@ async function loadSigningKey(m: ManifestPkg): Promise<{ publicJwk: JsonWebKey; 
 }
 
 async function ghFile(path: string, ref: string): Promise<string | null> {
-  const r = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/contents/${path}?ref=${ref}`);
+  const r = await gh("GET", `/repos/${repoFullName(PLATFORM_REPO)}/contents/${path}?ref=${ref}`);
   if (r.status === 404) return null;
   if (r.status !== 200) fail(`read ${path}: HTTP ${r.status}`);
   return Buffer.from(r.json.content as string, "base64").toString("utf8");
@@ -1987,7 +2101,7 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     if (!pubKeys.keys.some((k) => m.thumbprint(k) === key.kid)) fail(`signing key ${key.kid} is not in registry/keys.json`);
   }
   for (let attempt = 1; attempt <= 5; attempt++) {
-    const ref = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/git/ref/heads/main`);
+    const ref = await gh("GET", `/repos/${repoFullName(PLATFORM_REPO)}/git/ref/heads/main`);
     if (ref.status !== 200) fail(`registry: read main: HTTP ${ref.status}`);
     const headSha = ref.json.object.sha as string;
     const prevText = await ghFile(INDEX_PATH, headSha);
@@ -2009,9 +2123,9 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
       if (!check.ok) fail(`registry: self-verification of the signed index failed: ${check.reason ?? "refused"}`);
       jws = `${token}\n`;
     }
-    const commit = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits/${headSha}`);
+    const commit = await gh("GET", `/repos/${repoFullName(PLATFORM_REPO)}/git/commits/${headSha}`);
     const hasEnvelope = (await ghFile(ENVELOPE_PATH, headSha)) !== null;
-    const tree = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/trees`, {
+    const tree = await gh("POST", `/repos/${repoFullName(PLATFORM_REPO)}/git/trees`, {
       base_tree: commit.json.tree.sha,
       tree: [
         { path: INDEX_PATH, mode: "100644", type: "blob", content: body },
@@ -2026,9 +2140,9 @@ async function publishIndex(m: ManifestPkg | null, add: IndexRelease[]): Promise
     const msg = `${add.length ? `registry: ${add.map((r) => `${r.product}@${r.version}`).join(", ")}` : "registry: re-publish"}${jws ? "" : " (UNSIGNED interim)"}${
       devOnlyNotes.length ? `\n\nC113 (DEV_ONLY_PRODUCTS, digests unchanged):\n${devOnlyNotes.map((n) => `- ${n}`).join("\n")}` : ""
     }`;
-    const nc = await gh("POST", `/repos/${OWNER}/${PLATFORM_REPO}/git/commits`, { message: msg, tree: tree.json.sha, parents: [headSha] });
+    const nc = await gh("POST", `/repos/${repoFullName(PLATFORM_REPO)}/git/commits`, { message: msg, tree: tree.json.sha, parents: [headSha] });
     if (nc.status !== 201) fail(`registry: create commit: HTTP ${nc.status}`);
-    const upd = await gh("PATCH", `/repos/${OWNER}/${PLATFORM_REPO}/git/refs/heads/main`, { sha: nc.json.sha, force: false });
+    const upd = await gh("PATCH", `/repos/${repoFullName(PLATFORM_REPO)}/git/refs/heads/main`, { sha: nc.json.sha, force: false });
     if (upd.status === 200) {
       const rel = await ensureRelease(PLATFORM_REPO, REGISTRY_RELEASE_TAG, false, nc.json.sha as string);
       await uploadAsset(PLATFORM_REPO, rel, "index.json", body);
@@ -2136,11 +2250,13 @@ const GHCR_ACCEPT = [
 
 /** Checks a public ghcr image by digest: it exists and its OCI labels bind it to this repo + commit. */
 export async function verifyImageProvenance(ref: string, repo: string, commit: string, fetcher: typeof fetch = fetch): Promise<string | null> {
-  const m = /^ghcr\.io\/(martin-atrin\/[a-z0-9-]+)@(sha256:[0-9a-f]{64})$/.exec(ref);
+  // C206: ghcr.io/tealbrick (org releases) or a legacy namespace (tags pushed before the move); both are ours
+  const nsRe = KNOWN_OWNERS.map((o) => o.toLowerCase()).join("|");
+  const m = new RegExp(`^ghcr\\.io\\/((?:${nsRe})\\/([a-z0-9-]+))@(sha256:[0-9a-f]{64})$`).exec(ref);
   if (!m) return `bad image ref ${ref}`;
-  const [, name, digest] = m;
-  if (!name.endsWith(`/${repo.split("/")[1]}`) && !name.slice("martin-atrin/".length).startsWith(`${repo.split("/")[1]}-`))
-    return `${ref}: image name does not belong to ${repo}`;
+  const [, name, image, digest] = m as unknown as [string, string, string, string];
+  const repoName = repo.split("/")[1] as string;
+  if (image !== repoName && !image.startsWith(`${repoName}-`)) return `${ref}: image name does not belong to ${repo}`;
   const tokRes = await fetcher(`https://ghcr.io/token?scope=repository:${name}:pull`);
   if (!tokRes.ok) return `${ref}: no pull token (package private?) HTTP ${tokRes.status}`;
   const token = ((await tokRes.json()) as { token: string }).token;
@@ -2164,7 +2280,9 @@ export async function verifyImageProvenance(ref: string, repo: string, commit: s
   if (!cfgRes.ok) return `${ref}: config blob HTTP ${cfgRes.status}`;
   const labels = ((await cfgRes.json()) as { config?: { Labels?: Record<string, string> } }).config?.Labels ?? {};
   if (labels["org.opencontainers.image.revision"] !== commit) return `${ref}: revision label ${labels["org.opencontainers.image.revision"]} != ${commit}`;
-  if (labels["org.opencontainers.image.source"] !== `https://github.com/${repo}`)
+  // C206: an image built before the move carries the legacy owner in its source label; same repo name only
+  const sources = [repo, ...LEGACY_OWNERS.map((o) => `${o}/${repoName}`)].map((r) => `https://github.com/${r}`);
+  if (!sources.includes(labels["org.opencontainers.image.source"] as string))
     return `${ref}: source label ${labels["org.opencontainers.image.source"]} != https://github.com/${repo}`;
   return null;
 }
@@ -2313,18 +2431,29 @@ async function verifyCandidate(m: ManifestPkg, doc: ReleaseCandidateDoc, c: Rele
   }
 }
 
-/** Resolves a public ghcr tag to its manifest digest (null = not published yet). */
-export async function ghcrDigest(name: string, tag: string, fetcher: typeof fetch = fetch): Promise<string | null> {
-  const tok = await fetcher(`https://ghcr.io/token?scope=repository:martin-atrin/${name}:pull`);
+/** Resolves a public ghcr tag to its manifest digest (null = not published yet). `namespace` = ghcr.io/<owner>. */
+export async function ghcrDigest(name: string, tag: string, fetcher: typeof fetch = fetch, namespace: string = IMAGE_NAMESPACE): Promise<string | null> {
+  const ns = namespace.slice(`${REGISTRY_HOST}/`.length);
+  const tok = await fetcher(`https://ghcr.io/token?scope=repository:${ns}/${name}:pull`);
   if (!tok.ok) return null;
   const token = ((await tok.json()) as { token: string }).token;
-  const res = await fetcher(`https://ghcr.io/v2/martin-atrin/${name}/manifests/${tag}`, {
+  const res = await fetcher(`https://ghcr.io/v2/${ns}/${name}/manifests/${tag}`, {
     method: "HEAD",
     headers: { authorization: `Bearer ${token}`, accept: GHCR_ACCEPT },
   });
   if (!res.ok) return null;
   const d = res.headers.get("docker-content-digest");
   return d && /^sha256:[0-9a-f]{64}$/.test(d) ? d : null;
+}
+
+/** C206: the image of a tag in the first namespace that has it: ghcr.io/tealbrick (releases from the org), then the legacy
+ *  namespaces (tags pushed before the move). Releases are never re-tagged (C76), so one tag lives in one namespace. */
+export async function ghcrFind(name: string, tag: string, fetcher: typeof fetch = fetch): Promise<string | null> {
+  for (const ns of IMAGE_NAMESPACES) {
+    const d = await ghcrDigest(name, tag, fetcher, ns);
+    if (d) return `${ns}/${name}@${d}`;
+  }
+  return null;
 }
 
 /** Builds the candidate for one product tag from the repo at that commit + ghcr; null = images not published (pending). */
@@ -2340,19 +2469,19 @@ async function candidateFromTag(repo: string, tag: string, commit: string, rd: R
   }
   const candidates: ReleaseCandidate[] = [];
   for (const im of cfg.images.filter((x) => x.kind === "app" || x.kind === "bridge")) {
-    const d = await ghcrDigest(im.name, version);
-    if (!d) return null;
+    const image = await ghcrFind(im.name, version);
+    if (!image) return null;
     const services: { id: string; image: string }[] = [];
     for (const sv of cfg.images.filter((x) => x.kind === "service" && x.product === im.product)) {
-      const sd = await ghcrDigest(sv.name, version);
-      if (!sd) return null;
-      services.push({ id: sv.service as string, image: `${IMAGE_NAMESPACE}/${sv.name}@${sd}` });
+      const svImage = await ghcrFind(sv.name, version);
+      if (!svImage) return null;
+      services.push({ id: sv.service as string, image: svImage });
     }
     candidates.push({
       product: im.product,
       kind: im.kind === "bridge" ? "bridge" : "app",
       version,
-      image: `${IMAGE_NAMESPACE}/${im.name}@${d}`,
+      image,
       services: services.sort((a, b) => a.id.localeCompare(b.id)),
       manifest: im.manifest ?? null,
       runtimeFile: im.kind === "bridge" ? `${dirname(im.dockerfile)}/bridge-runtime.json` : null,
@@ -2443,7 +2572,7 @@ async function cmdRegistrySync(): Promise<void> {
 
 /** Keeps each REGISTRY_EXTRA_ASSETS release asset byte-equal to its file on main (uploads only on a difference). */
 async function syncRegistryExtraAssets(): Promise<void> {
-  const rel = await gh("GET", `/repos/${OWNER}/${PLATFORM_REPO}/releases/tags/${REGISTRY_RELEASE_TAG}`);
+  const rel = await gh("GET", `/repos/${repoFullName(PLATFORM_REPO)}/releases/tags/${REGISTRY_RELEASE_TAG}`);
   if (rel.status !== 200) return; // no registry release yet: the first publishIndex creates it with every asset
   for (const [path, name] of REGISTRY_EXTRA_ASSETS) {
     const want = await ghFile(path, "main");
@@ -2451,7 +2580,7 @@ async function syncRegistryExtraAssets(): Promise<void> {
     const res = await fetch(`https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${name}`, { redirect: "follow" });
     const have = res.ok ? await res.text() : null;
     if (have === want) continue;
-    await uploadAsset(PLATFORM_REPO, rel.json.id as number, name, want);
+    await uploadAsset(PLATFORM_REPO, ghRelease(rel.json), name, want);
     log(`registry-sync: release asset ${name} updated from ${path} on main`);
   }
 }
@@ -2628,17 +2757,8 @@ function workspacePackages(projectDir: string): WsPackage[] {
   return out;
 }
 
-async function uploadFile(repo: string, releaseId: number, name: string, data: Buffer, contentType: string): Promise<void> {
-  const list = await gh("GET", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?per_page=100`);
-  for (const a of (list.json ?? []) as Array<{ id: number; name: string }>) {
-    if (a.name === name) await gh("DELETE", `/repos/${OWNER}/${repo}/releases/assets/${a.id}`);
-  }
-  const up = await gh("POST", `/repos/${OWNER}/${repo}/releases/${releaseId}/assets?name=${encodeURIComponent(name)}`, undefined, {
-    host: "uploads.github.com",
-    contentType,
-    raw: data,
-  });
-  if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
+async function uploadFile(repo: string, rel: GhRelease, name: string, data: Buffer, contentType: string): Promise<void> {
+  await putAsset(repo, rel, name, data, contentType);
 }
 
 /** Package tags, step 1 (NO token): npm pack --ignore-scripts the tagged workspace package into .tb-ci/pack. */
