@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-16T19:59:13.485Z",
+  "generatedAt": "2026-10-16T20:17:09.127Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -4585,6 +4585,45 @@
       "commit": "80016de7e072e4965ec833adf5412905200014a4",
       "tag": "v0.1.20",
       "publishedAt": "2026-10-15T10:12:41.124Z"
+    },
+    {
+      "id": "rel_01M535PJRS461XEXRQTMAXB85V",
+      "product": "knowledge",
+      "kind": "app",
+      "version": "0.1.21-dev.1",
+      "channel": "dev",
+      "manifestDigest": "sha256:2d23b8edf8df6b5a3f3567a3564dc8b01ded09a088de9d4451832a585184f824",
+      "manifestUrl": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-knowledge/2ffe7f48a49fcd917c3268fe72ebf47e695350f9/tealbrick.manifest.json",
+      "skillsDigest": "sha256:fd1df5fa304bed11d7674033a93bc80343ac68a2b016a1bdbceef82b41a89978",
+      "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge@sha256:9be2bbb1838ffe0d26a52a8eba3e2cceede84a9428831ea6bbd216ba294acf80",
+      "artifact": null,
+      "source": null,
+      "runtime": null,
+      "services": [
+        {
+          "id": "gbrain",
+          "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge-gbrain@sha256:6c54a355c5aeb16a2e51fdf82d8d730362aa63543c46e931d7d4366750892984"
+        },
+        {
+          "id": "gbrain-db",
+          "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge-gbrain-db@sha256:184bb52f83986421aa937a5810d13479cbfa3961a1b29880ae57b05ae970f969"
+        },
+        {
+          "id": "notebook",
+          "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge-notebook@sha256:cd48b38036d48329e32d3c630c275bd35a1e8e9a9daa8b4f5f61e5b8e6277fbe"
+        },
+        {
+          "id": "notebook-db",
+          "image": "ghcr.io/tealbrick/opt2-tealbrick-knowledge-notebook-db@sha256:92343a0e7915e547a917213505d73b570f4e970b11bdfe1e299cfa307bbbaaa2"
+        }
+      ],
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-knowledge",
+      "commit": "2ffe7f48a49fcd917c3268fe72ebf47e695350f9",
+      "tag": "v0.1.21-dev.1",
+      "publishedAt": "2026-10-16T20:15:50.554Z"
     },
     {
       "id": "rel_01M52QVZ23HYSABWGE6MZHPKZY",
