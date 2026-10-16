@@ -118,6 +118,7 @@ The opt2 repos moved from the user account `Martin-Atrin` to the org `Tealbrick`
 - `registry/products.json`: `repo` = `Tealbrick/<repo>`, `formerRepos` = `["Martin-Atrin/<same repo>"]`. GTP-01 treats the two as one repo for earlier releases; a NEW release must carry `repo`.
 - Accepted on read: old-owner tarball pins (lockfiles, `TB_MANIFEST_PKG`, `TB_SPEC_PKG`), desktop artifact URLs, harness icons. `TB_MANIFEST_PKG`/`TB_SPEC_PKG` may also be dist-host URLs (C206 B6).
 - `PRIVATE_REPOS` lists every repo that is private in the org (C206/C208); each needs the read token.
+- Library tarballs on the dist host (C206 B6): `DIST_PRODUCTS` also lists spec (specs), manifest, miniapp-sdk, conformance, create-tealbrick-miniapp (sdk), ui (packages) and the pre-split bridge-repo tarballs TBD/Foxy pin (bridge-package-legacy, harness-claude-legacy, cli-legacy). registry-sync indexes them as kind `package` (versions from `since` on, plus the pinned `legacy` versions; a legacy release without `.integrity` gets the integrity computed from its bytes), the dist mirror copies the bytes, and consumers pin `<dist base>/<repo>-<tag>/<file>` with the unchanged lockfile integrity. A new library release that other dist tarballs depend on must be mirrored before the dependent package is tagged (`package-pack` checks the dist file exists).
 - Never create a repo named `Martin-Atrin/opt2-tealbrick-*` again: it deletes GitHub's redirects, which old index entries (`manifestUrl`), TBD builds and lockfiles rely on.
 
 ## Secrets (C72)

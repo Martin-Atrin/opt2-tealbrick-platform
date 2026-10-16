@@ -876,18 +876,111 @@ export function cliTarballUrl(version: string, distBase: string = CLI_DIST_BASE)
  *  installer and `tealbrick self-update` install; kind `package` = a library other repos depend on by dist URL (relay for the
  *  private bridge and TBD; the harnesses). Release tag `<tagDir>-v<semver>`; the packed package.json must be `packageName` at that
  *  version (and carry `bin` when set). Change by platform PR only; products.json binds each product to the CLI repo + kind. */
-export const DIST_PRODUCTS: Readonly<Record<string, { kind: "cli" | "package"; packageName: string; tagDir: string; bin?: string }>> = {
+export interface DistProduct {
+  kind: "cli" | "package";
+  packageName: string;
+  tagDir: string;
+  bin?: string;
+  /** C206 B6: the repo that releases it (default CLI_REPO). */
+  repo?: string;
+  /** C206 B6: releases from this version on are indexed (and mirrored); older tags are ignored unless listed in `legacy`.
+   *  Absent (and no `legacy`): every tag of the product (the CLI-repo products, C174/C181). */
+  since?: string;
+  /** C206 B6: older versions that consumers still pin (lockfiles before the dist host). Released before ci-v9.5 some have no
+   *  `.integrity` asset; the signer then computes it from the bytes it downloaded (the `.sha256` asset must still match). */
+  legacy?: readonly string[];
+}
+export const DIST_PRODUCTS: Readonly<Record<string, DistProduct>> = {
   cli: { kind: "cli", packageName: CLI_PACKAGE, tagDir: CLI_TAG_DIR, bin: "tealbrick" },
   relay: { kind: "package", packageName: "@opt2-tealbrick/relay", tagDir: "relay" },
   "harness-claude": { kind: "package", packageName: "@opt2-tealbrick/harness-claude", tagDir: "harness-claude" },
   "harness-eve": { kind: "package", packageName: "@opt2-tealbrick/harness-eve", tagDir: "harness-eve" },
+  // C206 B6: the libraries of the repos that go private (sdk, specs, packages) and the pre-split bridge-repo tarballs that
+  // TBD and Foxy still pin. Every consumer pins them by dist URL; the dist mirror copies the bytes (C164).
+  spec: {
+    kind: "package",
+    packageName: "@opt2-tealbrick/spec",
+    tagDir: "spec",
+    repo: "opt2-tealbrick-specs",
+    since: "0.1.38",
+    legacy: ["0.1.2", "0.1.7", "0.1.12", "0.1.18", "0.1.20", "0.1.22", "0.1.25", "0.1.26", "0.1.27", "0.1.28", "0.1.31", "0.1.35"],
+  },
+  manifest: {
+    kind: "package",
+    packageName: "@opt2-tealbrick/manifest",
+    tagDir: "manifest",
+    repo: "opt2-tealbrick-sdk",
+    since: "0.1.18",
+    legacy: ["0.1.1", "0.1.7", "0.1.12", "0.1.16"],
+  },
+  "miniapp-sdk": {
+    kind: "package",
+    packageName: "@opt2-tealbrick/miniapp-sdk",
+    tagDir: "miniapp-sdk",
+    repo: "opt2-tealbrick-sdk",
+    since: "0.1.24",
+    legacy: ["0.1.12", "0.1.16", "0.1.19", "0.1.20", "0.1.22"],
+  },
+  conformance: {
+    kind: "package",
+    packageName: "@opt2-tealbrick/conformance",
+    tagDir: "conformance",
+    repo: "opt2-tealbrick-sdk",
+    since: "0.1.18",
+    legacy: ["0.1.12", "0.1.16", "0.1.17"],
+  },
+  "create-tealbrick-miniapp": {
+    kind: "package",
+    packageName: "create-tealbrick-miniapp",
+    tagDir: "create-tealbrick-miniapp",
+    repo: "opt2-tealbrick-sdk",
+    since: "0.1.14",
+  },
+  ui: {
+    kind: "package",
+    packageName: "@opt2-tealbrick/ui",
+    tagDir: "ui",
+    repo: "opt2-tealbrick-packages",
+    since: "0.2.4",
+    legacy: ["0.2.0", "0.2.1", "0.2.3"],
+  },
+  "bridge-package-legacy": { kind: "package", packageName: "@opt2-tealbrick/bridge", tagDir: "bridge", repo: "opt2-tealbrick-bridge", legacy: ["0.1.1"] },
+  "harness-claude-legacy": {
+    kind: "package",
+    packageName: "@opt2-tealbrick/harness-claude",
+    tagDir: "harness-claude",
+    repo: "opt2-tealbrick-bridge",
+    legacy: ["0.1.0"],
+  },
+  "cli-legacy": { kind: "package", packageName: CLI_PACKAGE, tagDir: CLI_TAG_DIR, repo: "opt2-tealbrick-bridge", legacy: ["0.1.22"] },
 };
+
+/** C206 B6: the repo of a dist product. */
+export function distRepo(d: DistProduct): string {
+  return d.repo ?? CLI_REPO;
+}
+
+function semverCore(v: string): number[] {
+  return (/^(\d+)\.(\d+)\.(\d+)/.exec(v)?.slice(1) ?? ["0", "0", "0"]).map(Number);
+}
+/** C206 B6: whether the signer indexes this version of a dist product (see DistProduct since/legacy). */
+export function distVersionWanted(d: DistProduct, version: string): boolean {
+  if (d.legacy?.includes(version)) return true;
+  if (d.since === undefined) return d.legacy === undefined;
+  const [a, b] = [semverCore(version), semverCore(d.since)];
+  for (let i = 0; i < 3; i++) if ((a[i] as number) !== (b[i] as number)) return (a[i] as number) > (b[i] as number);
+  return true;
+}
+/** C206 B6: a legacy version may lack the `.integrity` asset (released before ci-v9.5). */
+function distIntegrityOptional(d: DistProduct, version: string): boolean {
+  return d.legacy?.includes(version) ?? false;
+}
 
 /** The only accepted URL of a DIST_PRODUCTS tarball: `<dist base>/opt2-tealbrick-cli-<tagDir>-v<ver>/<npm pack name>`. */
 export function distTarballUrl(product: string, version: string, distBase: string = CLI_DIST_BASE): string {
   const d = DIST_PRODUCTS[product];
   if (!d) throw new Error(`${product} is not a dist product (DIST_PRODUCTS)`);
-  return releaseUrl(CLI_REPO, d.tagDir, d.packageName, version, distBase);
+  return releaseUrl(distRepo(d), d.tagDir, d.packageName, version, distBase);
 }
 
 /** C174: what is wrong with a cli index entry (null = fine). Writers stay strict (L24): a dist-host URL that matches the version,
@@ -909,7 +1002,7 @@ export function distEntryProblem(r: IndexRelease): string | null {
   if (typeof a.url !== "string" || !DIST_BASES.some((b) => a.url.startsWith(`${b}/`)))
     return `artifact.url must be on a platform dist host (${DIST_BASES.join(", ")}), never a private GitHub URL; got ${JSON.stringify(a.url)}`;
   if (!DIST_BASES.some((b) => a.url === distTarballUrl(r.product, r.version, b)))
-    return `artifact.url must be <dist base>/${CLI_REPO}-${d.tagDir}-v${r.version}/${tarballName(d.packageName, r.version)}; got ${a.url}`;
+    return `artifact.url must be <dist base>/${distRepo(d)}-${d.tagDir}-v${r.version}/${tarballName(d.packageName, r.version)}; got ${a.url}`;
   if (typeof a.sha256 !== "string" || !SHA256_RE.test(a.sha256)) return "artifact.sha256 must be sha256:<64 hex>";
   if (a.integrity === undefined) return `artifact.integrity (sha512-<base64>) is required for kind ${r.kind}`;
   if (typeof a.integrity !== "string" || !SHA512_INTEGRITY_RE.test(a.integrity)) return "artifact.integrity must be sha512-<88 base64 chars>";
@@ -933,7 +1026,7 @@ export function distReleaseFromAssets(input: {
   commit: string;
   tgz: Uint8Array;
   sha256File: string;
-  integrityFile: string;
+  integrityFile: string | null;
   distBase?: string;
   publishedAt: string;
   id?: string;
@@ -948,7 +1041,9 @@ export function distReleaseFromAssets(input: {
   const listed = input.sha256File.trim().split(/\s+/);
   if (listed[0] !== sums.sha256 || (listed[1] !== undefined && listed[1].replace(/^\*/, "") !== name))
     return `${name}.sha256 does not match the tarball (tarball sha256 ${sums.sha256})`;
-  if (input.integrityFile.trim() !== sums.integrity) return `${name}.integrity does not match the tarball`;
+  if (input.integrityFile === null) {
+    if (!distIntegrityOptional(d, version)) return `${name} has no .integrity asset (template ci-v9.5+)`;
+  } else if (input.integrityFile.trim() !== sums.integrity) return `${name}.integrity does not match the tarball`;
   let pkg: { name?: unknown; version?: unknown; bin?: unknown };
   try {
     const raw = tarEntries(tgz).get("package.json");
@@ -980,7 +1075,7 @@ export function distReleaseFromAssets(input: {
     minOs: null,
     notarized: null,
     upgradeFrom: "*",
-    repo: `${OWNER}/${CLI_REPO}`,
+    repo: `${OWNER}/${distRepo(d)}`,
     commit,
     tag: `${d.tagDir}-v${version}`,
     publishedAt: input.publishedAt,
@@ -995,7 +1090,7 @@ export interface CliSourceResult {
   pending: string | null;
 }
 
-/** C174 signer source: cli-v* releases of the private CLI repo, read with the read-only token (C164). Without the token, or
+/** C174 signer source: cli-v* releases of the private CLI repo (C206 B6: and every DIST_PRODUCTS repo: specs, sdk, packages, bridge), read with the read-only token (C164). Without the token, or
  *  while the repo is in PENDING_REPOS and not visible, it is PENDING (no entry, no failure). A release without the tarball
  *  asset yet is pending too. Any other answer is a rejection (registry-sync fails loudly, as for other sources). The token
  *  goes to api.github.com only; asset downloads follow GitHub's redirect, and fetch drops the authorization header on the
@@ -1018,70 +1113,91 @@ export async function cliSourceReleases(opts: {
       headers: { authorization: `Bearer ${opts.token}`, accept, "x-github-api-version": "2022-11-28" },
       redirect: "follow",
     });
-  const base = `/repos/${OWNER}/${CLI_REPO}`;
-  const tagsRes = await api(`${base}/tags?per_page=100`);
-  if (tagsRes.status === 404 && PENDING_REPOS.includes(CLI_REPO)) {
-    out.pending = `${CLI_REPO} is not visible to the read token (PENDING_REPOS)`;
-    return out;
-  }
-  if (tagsRes.status !== 200) {
-    out.rejected.push(`${CLI_REPO}: list tags with the read token: HTTP ${tagsRes.status}`);
-    return out;
-  }
-  const tags = (await tagsRes.json()) as { name: string; commit: { sha: string } }[];
-  // C181: every DIST_PRODUCTS tag (cli-v*, relay-v*, harness-*-v*); the longest tagDir wins (none is a prefix of another today)
-  const byDir = new Map(Object.entries(DIST_PRODUCTS).map(([product, d]) => [d.tagDir, product]));
   const tagRe = /^([a-z0-9][a-z0-9-]*)-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/;
-  for (const t of tags) {
-    const m = tagRe.exec(t.name);
-    const product = m ? byDir.get(m[1] as string) : undefined;
-    if (!m || !product) continue;
-    const version = m[2] as string;
-    const d = DIST_PRODUCTS[product] as (typeof DIST_PRODUCTS)[string];
-    const key = `${product}@${version}@${releaseChannel(product, version)}`;
-    if (opts.known.has(key)) continue;
-    const where = `${CLI_REPO} ${t.name}`;
-    try {
-      const relRes = await api(`${base}/releases/tags/${encodeURIComponent(t.name)}`);
-      if (relRes.status === 404) continue; // tag pushed, release Action not done yet: pending
-      if (relRes.status !== 200) {
-        out.rejected.push(`${where}: read release: HTTP ${relRes.status}`);
-        continue;
+  // C206 B6: every repo that releases a DIST_PRODUCTS product (CLI repo first, as before)
+  const repos = [...new Set([CLI_REPO, ...Object.values(DIST_PRODUCTS).map(distRepo)])];
+  for (const repo of repos) {
+    const base = `/repos/${OWNER}/${repo}`;
+    const tags: { name: string; commit: { sha: string } }[] = [];
+    let listed = true;
+    for (let page = 1; page <= 10; page++) {
+      const tagsRes = await api(`${base}/tags?per_page=100&page=${page}`);
+      if (tagsRes.status === 404 && PENDING_REPOS.includes(repo)) {
+        if (repo === CLI_REPO) {
+          out.pending = `${CLI_REPO} is not visible to the read token (PENDING_REPOS)`;
+          return out;
+        }
+        listed = false;
+        break;
       }
-      const assets = ((await relRes.json()) as { assets?: { id: number; name: string }[] }).assets ?? [];
-      const name = tarballName(d.packageName, version);
-      const find = (n: string) => assets.find((a) => a.name === n);
-      const tgzAsset = find(name);
-      if (!tgzAsset) continue; // not uploaded yet: pending
-      const shaAsset = find(`${name}.sha256`);
-      const intAsset = find(`${name}.integrity`);
-      if (!shaAsset || !intAsset) {
-        out.rejected.push(`${where}: ${name} has no .sha256/.integrity asset (template ci-v9.5+)`);
-        continue;
+      if (tagsRes.status !== 200) {
+        out.rejected.push(`${repo}: list tags with the read token: HTTP ${tagsRes.status}`);
+        listed = false;
+        break;
       }
-      const get = async (id: number): Promise<Uint8Array> => {
-        const r = await api(`${base}/releases/assets/${id}`, "application/octet-stream");
-        if (!r.ok) throw new Error(`download asset ${id}: HTTP ${r.status}`);
-        return new Uint8Array(await r.arrayBuffer());
-      };
-      const text = (b: Uint8Array) => Buffer.from(b).toString("utf8");
-      const r = distReleaseFromAssets({
-        product,
-        version,
-        commit: t.commit.sha,
-        tgz: await get(tgzAsset.id),
-        sha256File: text(await get(shaAsset.id)),
-        integrityFile: text(await get(intAsset.id)),
-        distBase: opts.distBase,
-        publishedAt: (opts.now ?? (() => new Date().toISOString()))(),
-      });
-      if (typeof r === "string") out.rejected.push(`${where}: ${r}`);
-      else {
-        out.add.push(r);
-        opts.known.add(key);
+      const pageTags = (await tagsRes.json()) as { name: string; commit: { sha: string } }[];
+      tags.push(...pageTags);
+      if (pageTags.length < 100) break;
+    }
+    if (!listed) continue;
+    // C181: every DIST_PRODUCTS tag of this repo (cli-v*, relay-v*, harness-*-v*, spec-v*, …); tag dirs are unique per repo
+    const byDir = new Map(
+      Object.entries(DIST_PRODUCTS)
+        .filter(([, d]) => distRepo(d) === repo)
+        .map(([product, d]) => [d.tagDir, product]),
+    );
+    for (const t of tags) {
+      const m = tagRe.exec(t.name);
+      const product = m ? byDir.get(m[1] as string) : undefined;
+      if (!m || !product) continue;
+      const version = m[2] as string;
+      const d = DIST_PRODUCTS[product] as DistProduct;
+      if (!distVersionWanted(d, version)) continue; // C206 B6: older library versions nobody pins
+      const key = `${product}@${version}@${releaseChannel(product, version)}`;
+      if (opts.known.has(key)) continue;
+      const where = `${repo} ${t.name}`;
+      try {
+        const relRes = await api(`${base}/releases/tags/${encodeURIComponent(t.name)}`);
+        if (relRes.status === 404) continue; // tag pushed, release Action not done yet: pending
+        if (relRes.status !== 200) {
+          out.rejected.push(`${where}: read release: HTTP ${relRes.status}`);
+          continue;
+        }
+        const assets = ((await relRes.json()) as { assets?: { id: number; name: string }[] }).assets ?? [];
+        const name = tarballName(d.packageName, version);
+        const find = (n: string) => assets.find((a) => a.name === n);
+        const tgzAsset = find(name);
+        if (!tgzAsset) continue; // not uploaded yet: pending
+        const shaAsset = find(`${name}.sha256`);
+        const intAsset = find(`${name}.integrity`);
+        if (!shaAsset || (!intAsset && !distIntegrityOptional(d, version))) {
+          out.rejected.push(`${where}: ${name} has no .sha256/.integrity asset (template ci-v9.5+)`);
+          continue;
+        }
+        const get = async (id: number): Promise<Uint8Array> => {
+          const r = await api(`${base}/releases/assets/${id}`, "application/octet-stream");
+          if (!r.ok) throw new Error(`download asset ${id}: HTTP ${r.status}`);
+          return new Uint8Array(await r.arrayBuffer());
+        };
+        const text = (b: Uint8Array) => Buffer.from(b).toString("utf8");
+        const r = distReleaseFromAssets({
+          product,
+          version,
+          commit: t.commit.sha,
+          tgz: await get(tgzAsset.id),
+          sha256File: text(await get(shaAsset.id)),
+          integrityFile: intAsset ? text(await get(intAsset.id)) : null,
+          distBase: opts.distBase,
+          publishedAt: (opts.now ?? (() => new Date().toISOString()))(),
+        });
+        if (typeof r === "string") out.rejected.push(`${where}: ${r}`);
+        else {
+          out.add.push(r);
+          opts.known.add(key);
+        }
+      } catch (e) {
+        out.rejected.push(`${where}: ${(e as Error).message}`);
       }
-    } catch (e) {
-      out.rejected.push(`${where}: ${(e as Error).message}`);
     }
   }
   return out;
@@ -2547,10 +2663,10 @@ async function cmdRegistrySync(): Promise<void> {
   if (cli.pending) log(`registry-sync: PEND cli source: ${cli.pending}; no cli entry this run`);
   for (const r of cli.add) {
     const bound = productBindingProblem(bindings, r);
-    if (bound) rejected.push(`${CLI_REPO} ${r.tag} ${r.product}: ${bound}`);
+    if (bound) rejected.push(`${r.repo} ${r.tag} ${r.product}: ${bound}`);
     else {
       add.push(r);
-      log(`verified ${r.product}@${r.version} from ${CLI_REPO}@${(r.commit ?? "").slice(0, 8)} (${r.artifact?.url})`);
+      log(`verified ${r.product}@${r.version} from ${r.repo}@${(r.commit ?? "").slice(0, 8)} (${r.artifact?.url})`);
     }
   }
   rejected.push(...cli.rejected);
