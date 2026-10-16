@@ -28,8 +28,10 @@ import {
   DIST_PRODUCTS,
   distEntryProblem,
   distReleaseFromAssets,
+  distRepo,
   distTag,
   distTarballUrl,
+  distVersionWanted,
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
@@ -1169,7 +1171,12 @@ test("ci-v9.6 opt2-tealbrick-cli: in OPT2_REPOS and the activation list; no repo
       ["relay", { repo: `Tealbrick/${cliRepo}`, kind: "package", formerRepos: former }],
     ],
   );
-  assert.ok(!Object.values(products).some((p) => p.repo.endsWith("/opt2-tealbrick-sdk")));
+  // C206 B6: the sdk repo is bound only for its library tarballs (kind package), never for an app or the bridge
+  assert.ok(
+    Object.values(products)
+      .filter((p) => p.repo.endsWith("/opt2-tealbrick-sdk"))
+      .every((p) => p.kind === "package"),
+  );
 });
 
 // ---------- C174: `cli` release-index kind (C173 installer + self-update) ----------
@@ -1306,7 +1313,9 @@ function fakeCliGitHub(opts: {
     calls.push({ url, auth: Boolean(headers.authorization) });
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     const base = "https://api.github.com/repos/Tealbrick/opt2-tealbrick-cli";
-    if (url === `${base}/tags?per_page=100`)
+    // C206 B6: the other dist-product repos have no tags in this fake
+    if (/^https:\/\/api\.github\.com\/repos\/Tealbrick\/opt2-tealbrick-(specs|sdk|packages|bridge)\/tags\?per_page=100&page=1$/.test(url)) return json(200, []);
+    if (url === `${base}/tags?per_page=100&page=1`)
       return opts.tagsStatus && opts.tagsStatus !== 200
         ? json(opts.tagsStatus, { message: "Not Found" })
         : json(200, [
@@ -1358,7 +1367,7 @@ test("C174: cli source with the token builds the entry from a fixture release; p
   assert.equal(e.commit, CLI_SHA);
   assert.ok(known.has("cli@0.2.0@stable"));
   assert.ok(
-    gh.calls.every((c) => c.url.startsWith("https://api.github.com/repos/Tealbrick/opt2-tealbrick-cli/") && c.auth),
+    gh.calls.every((c) => /^https:\/\/api\.github\.com\/repos\/Tealbrick\/opt2-tealbrick-(cli|specs|sdk|packages|bridge)\//.test(c.url) && c.auth),
     "token only to the CLI repo API",
   );
   assert.equal(new Set(gh.calls.filter((c) => c.url.includes("/releases/assets/")).map((c) => c.url)).size, 3, "tgz + .sha256 + .integrity downloaded");
@@ -1538,7 +1547,7 @@ test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sh
   assert.match(String(distReleaseFromAssets({ ...base, ...wrong })), /not @opt2-tealbrick\/relay@0\.1\.0/);
   assert.match(String(distReleaseFromAssets({ ...base, product: "bridge", ...rf })), /not a dist product/);
   assert.match(distEntryProblem({ ...r, kind: "cli" }) ?? "", /must be kind package/);
-  assert.match(distEntryProblem({ ...r, product: "spec" }) ?? "", /not a dist product/);
+  assert.match(distEntryProblem({ ...r, product: "no-such-product" }) ?? "", /not a dist product/);
   const art = r.artifact as { url: string; sha256: string; integrity: string };
   assert.match(
     distEntryProblem({
@@ -1557,7 +1566,7 @@ test("C181: kind package (relay, harnesses) from the CLI repo: dist URL only, sh
   // products.json binds every dist product to the CLI repo with its kind; mergeIndex accepts it and keeps it immutable
   const bindings = loadProductBindings();
   for (const [product, d] of Object.entries(DIST_PRODUCTS))
-    assert.deepEqual(bindings[product], { repo: `Tealbrick/${CLI_REPO}`, kind: d.kind, formerRepos: [`Martin-Atrin/${CLI_REPO}`] }, product);
+    assert.deepEqual(bindings[product], { repo: `Tealbrick/${distRepo(d)}`, kind: d.kind, formerRepos: [`Martin-Atrin/${distRepo(d)}`] }, product);
   const i1 = mergeIndex(null, [r], [], "t", [], bindings);
   assert.equal(i1.releases.length, 1);
   assert.throws(
@@ -1729,4 +1738,70 @@ test("C206 ci-v9.8 templates: runner + template from Tealbrick; pre-move manifes
   };
   assert.match(schema.$id, /^https:\/\/raw\.githubusercontent\.com\/Tealbrick\//);
   assert.deepEqual(schema.properties.distBaseUrl.enum, [...DIST_BASES], "schema enum == DIST_BASES");
+});
+
+test("C206 B6: library dist products (spec, manifest, miniapp-sdk, conformance, ui, create-tealbrick-miniapp, legacy bridge-repo tarballs)", () => {
+  assert.equal(distRepo(DIST_PRODUCTS.cli as NonNullable<typeof DIST_PRODUCTS.cli>), CLI_REPO);
+  const spec = DIST_PRODUCTS.spec as NonNullable<typeof DIST_PRODUCTS.spec>;
+  assert.equal(distRepo(spec), "opt2-tealbrick-specs");
+  assert.equal(distTarballUrl("spec", "0.1.20"), `${DIST_BASES[0]}/opt2-tealbrick-specs-spec-v0.1.20/opt2-tealbrick-spec-0.1.20.tgz`);
+  assert.ok(isDistTarballUrl(distTarballUrl("spec", "0.1.20")) && isSpecTarballUrl(distTarballUrl("spec", "0.1.20")));
+  assert.equal(distTarballUrl("ui", "0.2.4"), `${DIST_BASES[0]}/opt2-tealbrick-packages-ui-v0.2.4/opt2-tealbrick-ui-0.2.4.tgz`);
+  assert.equal(
+    distTarballUrl("create-tealbrick-miniapp", "0.1.14"),
+    `${DIST_BASES[0]}/opt2-tealbrick-sdk-create-tealbrick-miniapp-v0.1.14/create-tealbrick-miniapp-0.1.14.tgz`,
+  );
+  assert.equal(distTarballUrl("cli-legacy", "0.1.22"), `${DIST_BASES[0]}/opt2-tealbrick-bridge-cli-v0.1.22/opt2-tealbrick-cli-0.1.22.tgz`);
+  // since / legacy
+  assert.ok(distVersionWanted(spec, "0.1.38") && distVersionWanted(spec, "0.1.39") && distVersionWanted(spec, "0.2.0") && distVersionWanted(spec, "1.0.0"));
+  assert.ok(distVersionWanted(spec, "0.1.20"), "pinned legacy");
+  assert.ok(!distVersionWanted(spec, "0.1.21") && !distVersionWanted(spec, "0.1.1"), "older versions nobody pins are ignored");
+  const legacyOnly = DIST_PRODUCTS["bridge-package-legacy"] as NonNullable<(typeof DIST_PRODUCTS)["cli"]>;
+  assert.ok(distVersionWanted(legacyOnly, "0.1.1") && !distVersionWanted(legacyOnly, "0.1.29"), "legacy-only: nothing new");
+  assert.ok(distVersionWanted(DIST_PRODUCTS.relay as NonNullable<typeof DIST_PRODUCTS.relay>, "9.9.9"), "CLI-repo products: every version");
+  // tag dirs are unique per repo
+  const seen = new Set<string>();
+  for (const d of Object.values(DIST_PRODUCTS)) {
+    const k = `${distRepo(d)}/${d.tagDir}`;
+    assert.ok(!seen.has(k), k);
+    seen.add(k);
+  }
+  // products.json binds each of them to its repo as kind package
+  const b = loadProductBindings();
+  for (const p of [
+    "spec",
+    "manifest",
+    "miniapp-sdk",
+    "conformance",
+    "ui",
+    "create-tealbrick-miniapp",
+    "bridge-package-legacy",
+    "harness-claude-legacy",
+    "cli-legacy",
+  ])
+    assert.equal(b[p]?.kind, "package", p);
+});
+
+test("C206 B6: a legacy version without the .integrity asset is indexed with the integrity computed from the bytes; a new one is refused", () => {
+  const rf = relayFixture(JSON.stringify({ name: "@opt2-tealbrick/spec", version: "0.1.20" }));
+  // relayFixture names the file after the relay package; rebuild the sums for the spec name
+  const name = "opt2-tealbrick-spec-0.1.20.tgz";
+  const sums = assetChecksums(name, rf.tgz);
+  const base = { product: "spec", commit: CLI_SHA, publishedAt: "2026-10-16T00:00:00.000Z", tgz: rf.tgz, sha256File: `${sums.sha256}  ${name}` };
+  const legacy = distReleaseFromAssets({ ...base, version: "0.1.20", integrityFile: null });
+  assert.equal(typeof legacy, "object", String(legacy));
+  assert.equal((legacy as IndexRelease).artifact?.integrity, sums.integrity);
+  assert.equal((legacy as IndexRelease).repo, "Tealbrick/opt2-tealbrick-specs");
+  assert.equal((legacy as IndexRelease).tag, "spec-v0.1.20");
+  const rf2 = relayFixture(JSON.stringify({ name: "@opt2-tealbrick/spec", version: "0.1.38" }));
+  const n2 = "opt2-tealbrick-spec-0.1.38.tgz";
+  const s2 = assetChecksums(n2, rf2.tgz);
+  assert.match(
+    String(distReleaseFromAssets({ ...base, tgz: rf2.tgz, sha256File: `${s2.sha256}  ${n2}`, version: "0.1.38", integrityFile: null })),
+    /no \.integrity asset/,
+  );
+  assert.match(
+    String(distReleaseFromAssets({ ...base, version: "0.1.20", sha256File: `${"0".repeat(64)}  ${name}`, integrityFile: null })),
+    /\.sha256 does not match/,
+  );
 });
