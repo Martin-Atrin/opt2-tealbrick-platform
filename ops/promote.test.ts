@@ -6,6 +6,7 @@ import {
   checkIndex,
   ciGreen,
   INDEX_URL,
+  indexProblems,
   ORDER,
   OWNER,
   parseArgs,
@@ -140,14 +141,14 @@ test("checkIndex: stable + digest required for bridge and every app", () => {
 
 test("rollbackCommand + recordPath", () => {
   const s: ReleaseSet = parseSet(base());
-  assert.equal(rollbackCommand(s, "/x/releases/RS-2.json"), "node ops/promote.ts --set /x/releases/RS-1.json");
+  assert.equal(rollbackCommand(s, "/x/releases/RS-2.json"), "node ops/promote.ts --rollback --set /x/releases/RS-1.json");
   assert.match(rollbackCommand(parseSet(base({ id: "RS-1", previous: null })), "/x/releases/RS-1.json"), /no previous set/);
   assert.equal(recordPath("/x/releases/RS-2.json", "RS-2"), "/x/releases/RS-2.promoted.json");
   assert.equal(recordPath("/x/releases/RS-2.json", "RS-2", true), "/x/releases/RS-2.repointed.json", "C206: the promotion record is kept");
 });
 
 test("parseArgs: --set required and named RS-<n>.json; production (dev) refused", () => {
-  assert.deepEqual(parseArgs(["--set", "r/RS-3.json"]), { setFile: "r/RS-3.json", environment: "live", dryRun: false, repoint: false });
+  assert.deepEqual(parseArgs(["--set", "r/RS-3.json"]), { setFile: "r/RS-3.json", environment: "live", dryRun: false, repoint: false, rollback: false });
   assert.equal(parseArgs(["--set", "r/RS-3.json", "--repoint"]).repoint, true);
   assert.equal(parseArgs(["--set", "r/RS-3.json", "--dry-run"]).dryRun, true);
   assert.throws(() => parseArgs([]), /--set/);
@@ -164,4 +165,12 @@ test("parseSet: cli.repo optional, must be an opt2 repo", () => {
 test("C206: promote reads and deploys from the Tealbrick org", () => {
   assert.equal(OWNER, "Tealbrick");
   assert.equal(INDEX_URL, "https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.json");
+});
+
+test("--rollback: app-index problems become warnings; services still checked", () => {
+  assert.equal(parseArgs(["--set", "r/RS-1.json", "--rollback"]).rollback, true);
+  assert.equal(parseArgs(["--set", "r/RS-2.json"]).rollback, false);
+  const p = ["fleet@0.1.10 is not a stable app release in the index"];
+  assert.deepEqual(indexProblems(p, true), { fatal: [], warnings: p });
+  assert.deepEqual(indexProblems(p, false), { fatal: p, warnings: [] });
 });
