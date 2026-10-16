@@ -2105,18 +2105,29 @@ export function uploadTarget(uploadUrl: string, name: string): { host: string; p
 /** Replaces asset `name` on the release (delete the old one, then upload). */
 async function putAsset(repo: string, rel: GhRelease, name: string, data: string | Buffer, contentType: string): Promise<void> {
   const full = repoFullName(repo);
-  const list = await gh("GET", `/repos/${full}/releases/${rel.id}/assets?per_page=100`);
-  for (const a of (list.json ?? []) as Array<{ id: number; name: string }>) {
-    if (a.name === name) await gh("DELETE", `/repos/${full}/releases/assets/${a.id}`);
-  }
   let target: { host: string; path: string };
   try {
     target = uploadTarget(rel.uploadUrl, name);
   } catch (e) {
     fail((e as Error).message);
   }
-  const up = await gh("POST", target.path, undefined, { host: target.host, contentType, raw: data });
-  if (up.status !== 201) fail(`upload asset ${name}: HTTP ${up.status}`);
+  // C206: a delete that did not land (transient API error) made the upload answer 422 already_exists and left the committed
+  // index ahead of the published asset. Delete is checked, and a 422 is retried after a fresh delete.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const list = await gh("GET", `/repos/${full}/releases/${rel.id}/assets?per_page=100`);
+    if (list.status !== 200 || !Array.isArray(list.json)) fail(`list assets of release ${rel.id}: HTTP ${list.status}`);
+    for (const a of list.json as Array<{ id: number; name: string }>) {
+      if (a.name !== name) continue;
+      const d = await gh("DELETE", `/repos/${full}/releases/assets/${a.id}`);
+      if (d.status !== 204 && d.status !== 404) log(`delete asset ${name} (${a.id}): HTTP ${d.status}`);
+    }
+    const up = await gh("POST", target.path, undefined, { host: target.host, contentType, raw: data });
+    if (up.status === 201) return;
+    log(`upload asset ${name}: HTTP ${up.status} ${JSON.stringify(up.json).slice(0, 300)} (attempt ${attempt}/3)`);
+    if (up.status !== 422) break;
+    await new Promise((r) => setTimeout(r, 2000 * attempt));
+  }
+  fail(`upload asset ${name}: failed`);
 }
 
 async function uploadAsset(repo: string, rel: GhRelease, name: string, data: string): Promise<void> {
@@ -2690,6 +2701,25 @@ async function cmdRegistrySync(): Promise<void> {
 async function syncRegistryExtraAssets(): Promise<void> {
   const rel = await gh("GET", `/repos/${repoFullName(PLATFORM_REPO)}/releases/tags/${REGISTRY_RELEASE_TAG}`);
   if (rel.status !== 200) return; // no registry release yet: the first publishIndex creates it with every asset
+  // C206: the signed index pair itself too, so a publish that committed main but failed its upload heals on the next run
+  // (main holds index.json + index.jws as one signed pair; they are re-uploaded together, envelope last).
+  const pair: (readonly [string, string])[] = [
+    [INDEX_PATH, "index.json"],
+    [ENVELOPE_PATH, "index.jws"],
+  ];
+  const pairStale = [];
+  for (const [path, name] of pair) {
+    const want = await ghFile(path, "main");
+    const res = await fetch(`https://github.com/${OWNER}/${PLATFORM_REPO}/releases/download/${REGISTRY_RELEASE_TAG}/${name}`, { redirect: "follow" });
+    if (want !== null && (!res.ok || (await res.text()) !== want)) pairStale.push(name);
+  }
+  if (pairStale.length) {
+    for (const [path, name] of pair) {
+      const want = await ghFile(path, "main");
+      if (want !== null) await uploadAsset(PLATFORM_REPO, ghRelease(rel.json), name, want);
+    }
+    log(`registry-sync: release assets index.json + index.jws re-published from main (stale: ${pairStale.join(", ")})`);
+  }
   for (const [path, name] of REGISTRY_EXTRA_ASSETS) {
     const want = await ghFile(path, "main");
     if (want === null) continue;
