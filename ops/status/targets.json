@@ -1,22 +1,30 @@
 [
-  { "id": "portal-gui", "name": "Portal", "url": "https://dev.tealbrick.com/", "expect": { "status": 200 } },
+  { "id": "live-portal", "name": "Portal (portal.tealbrick.com)", "url": "https://portal.tealbrick.com/", "expect": { "status": 200 } },
   {
-    "id": "portal-api",
+    "id": "live-portal-api",
     "name": "Portal API (gateway → Core)",
-    "url": "https://dev.tealbrick.com/api/v1/me",
+    "url": "https://portal.tealbrick.com/api/v1/me",
     "expect": { "status": 401, "bodyIncludes": "\"error\"" }
   },
-  {
-    "id": "portal-core",
-    "name": "Portal Core health (private)",
-    "url": "http://portal-core.railway.internal:8080/internal/health",
-    "expect": { "status": 200, "bodyIncludes": "\"ok\":true" }
-  },
-  { "id": "website", "name": "Website (preview)", "url": "https://website-production-66a1.up.railway.app/", "expect": { "status": 200 } },
+  { "id": "live-website", "name": "Website (tealbrick.com)", "url": "https://tealbrick.com/", "expect": { "status": 200 } },
   {
     "id": "release-index",
     "name": "Release index (signed)",
     "url": "https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.jws",
     "expect": { "status": 200 }
-  }
+  },
+  { "id": "portal-gui", "name": "Dev Portal (dev.tealbrick.com)", "url": "https://dev.tealbrick.com/", "expect": { "status": 200 } },
+  {
+    "id": "portal-api",
+    "name": "Dev Portal API (gateway → Core)",
+    "url": "https://dev.tealbrick.com/api/v1/me",
+    "expect": { "status": 401, "bodyIncludes": "\"error\"" }
+  },
+  {
+    "id": "portal-core",
+    "name": "Dev Portal Core health (private)",
+    "url": "http://portal-core.railway.internal:8080/internal/health",
+    "expect": { "status": 200, "bodyIncludes": "\"ok\":true" }
+  },
+  { "id": "website", "name": "Dev website (preview)", "url": "https://website-production-66a1.up.railway.app/", "expect": { "status": 200 } }
 ]
