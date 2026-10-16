@@ -70,8 +70,9 @@ docker run -d --name tealbrick-bridge --restart unless-stopped \
   -e TB_PUBLIC_URL=<https address where agents reach this bridge> \
   -e TB_KEK=<32 random bytes: base64url (43 chars) or hex (64 chars)> \
   -p 8080:8080 \
-  ghcr.io/martin-atrin/opt2-tealbrick-bridge-server:<version>
+  ghcr.io/tealbrick/opt2-tealbrick-bridge-server:<version>
 ```
+- Image path (C206 org move): bridge versions released from the Tealbrick org are in `ghcr.io/tealbrick/opt2-tealbrick-bridge-server`. Versions released before the move stay in `ghcr.io/martin-atrin/opt2-tealbrick-bridge-server` (never deleted). Use the image reference of the version's entry in the signed release index (`image`), which names the right path and digest.
 - `<version>`: a bridge version from the signed release index (`kind: "bridge"`); pin it, never `latest`. Never run a `-conformance` tag (test roots on; never in the index).
 - `TB_KEK` (C35): generate once (`openssl rand -hex 32`), keep it in the owner's secret store; it seals the bridge state on the volume. Lost KEK = re-enrol with a new code. Rotation: new key as `TB_KEK`, old as `TB_KEK_PREVIOUS` for one start (BRG-05).
 - The enrolment code is used once; a restart with the same volume needs no new code. Optional: `TB_PUBLIC_HOST=127.0.0.1` behind a local TLS proxy (C171); `TB_INTERNAL_PORT` (default 8788) is the private companion listener for apps on the same host network.

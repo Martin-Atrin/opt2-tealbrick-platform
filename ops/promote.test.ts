@@ -1,7 +1,20 @@
 // C199: planning logic of ops/promote.ts (no network, no Railway).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CI_CONTEXT, checkIndex, ciGreen, ORDER, parseArgs, parseSet, planSteps, type ReleaseSet, recordPath, rollbackCommand } from "./promote.ts";
+import {
+  CI_CONTEXT,
+  checkIndex,
+  ciGreen,
+  INDEX_URL,
+  ORDER,
+  OWNER,
+  parseArgs,
+  parseSet,
+  planSteps,
+  type ReleaseSet,
+  recordPath,
+  rollbackCommand,
+} from "./promote.ts";
 
 const sha = (c: string) => c.repeat(40);
 const base = (over: Record<string, unknown> = {}) => ({
@@ -69,6 +82,11 @@ test("planSteps: fixed order core → gui → website; running SHA is skipped", 
     [true, false, false],
   );
   assert.equal(steps[1]?.sha, sha("b"));
+  // C206 --repoint: nothing is skipped, so every service is redeployed from its (org) source at the same SHA
+  assert.deepEqual(
+    planSteps(s, { "portal-core": sha("a"), "portal-gui": sha("b"), website: sha("c") }, true).map((x) => x.skip),
+    [false, false, false],
+  );
 });
 
 test("ciGreen: only the Woodpecker push context counts", () => {
@@ -98,10 +116,12 @@ test("rollbackCommand + recordPath", () => {
   assert.equal(rollbackCommand(s, "/x/releases/RS-2.json"), "node ops/promote.ts --set /x/releases/RS-1.json");
   assert.match(rollbackCommand(parseSet(base({ id: "RS-1", previous: null })), "/x/releases/RS-1.json"), /no previous set/);
   assert.equal(recordPath("/x/releases/RS-2.json", "RS-2"), "/x/releases/RS-2.promoted.json");
+  assert.equal(recordPath("/x/releases/RS-2.json", "RS-2", true), "/x/releases/RS-2.repointed.json", "C206: the promotion record is kept");
 });
 
 test("parseArgs: --set required and named RS-<n>.json; production (dev) refused", () => {
-  assert.deepEqual(parseArgs(["--set", "r/RS-3.json"]), { setFile: "r/RS-3.json", environment: "live", dryRun: false });
+  assert.deepEqual(parseArgs(["--set", "r/RS-3.json"]), { setFile: "r/RS-3.json", environment: "live", dryRun: false, repoint: false });
+  assert.equal(parseArgs(["--set", "r/RS-3.json", "--repoint"]).repoint, true);
   assert.equal(parseArgs(["--set", "r/RS-3.json", "--dry-run"]).dryRun, true);
   assert.throws(() => parseArgs([]), /--set/);
   assert.throws(() => parseArgs(["--set", "r/set.json"]), /RS-<n>.json/);
@@ -112,4 +132,9 @@ test("parseArgs: --set required and named RS-<n>.json; production (dev) refused"
 test("parseSet: cli.repo optional, must be an opt2 repo", () => {
   assert.equal(parseSet(base({ cli: { version: "0.1.22", repo: "opt2-tealbrick-bridge" } })).cli.repo, "opt2-tealbrick-bridge");
   assert.throws(() => parseSet(base({ cli: { version: "0.1.22", repo: "evil/repo" } })), /cli.repo/);
+});
+
+test("C206: promote reads and deploys from the Tealbrick org", () => {
+  assert.equal(OWNER, "Tealbrick");
+  assert.equal(INDEX_URL, "https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.json");
 });

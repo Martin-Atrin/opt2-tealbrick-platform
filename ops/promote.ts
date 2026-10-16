@@ -6,7 +6,9 @@
 //    version has a release in its repo (warning only: the CLI is not deployed by this script).
 // 3. Deploys in a fixed order — portal-core → portal-gui → website — with ops/railway-deploy.ts (pinned SHA, C141),
 //    waits for Railway SUCCESS (Core's health check runs after its migrations, so SUCCESS = migrated + healthy), and
-//    smoke-tests after each step. A service already running the set's SHA is skipped.
+//    smoke-tests after each step. A service already running the set's SHA is skipped, unless --repoint (C206): then every
+//    service is redeployed at the set's SHA from its CURRENT GitHub source (railway-deploy sets source = OWNER/<repo>), so a
+//    same-SHA promote re-points live to the org repos; the record goes to RS-<n>.repointed.json (the promotion record stays).
 // 4. Stops at the first failure and prints the rollback command (promote the previous set). Writes
 //    <dir>/RS-<n>.promoted.json (the promotion record, also on failure). --dry-run prints the plan and the checks only.
 // Apps and the bridge are never deployed here: app updates on live stay owner-triggered in the Portal (C199 (4)).
@@ -18,7 +20,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PROJECT = "15297ce5-0283-4901-a408-9c802e6ac53a"; // Railway project "opt2"
-export const OWNER = "Martin-Atrin";
+/** C206: the opt2 repos live in the Tealbrick org (GitHub redirects the old Martin-Atrin paths; we do not rely on that). */
+export const OWNER = "Tealbrick";
 export const INDEX_URL = `https://github.com/${OWNER}/opt2-tealbrick-platform/releases/download/registry/index.json`;
 export const CI_CONTEXT = "ci/woodpecker/push/ci";
 
@@ -92,9 +95,15 @@ export interface Step {
 /** Fixed order (C199): Core first (migrations), then the GUI gateway, then the website. */
 export const ORDER: readonly ServiceName[] = ["portal-core", "portal-gui", "website"];
 
-export function planSteps(set: ReleaseSet, running: Partial<Record<ServiceName, string | null>>): Step[] {
+/** `repoint` (C206): never skip, so every service is redeployed (and its Railway source re-set) at the set's SHA. */
+export function planSteps(set: ReleaseSet, running: Partial<Record<ServiceName, string | null>>, repoint = false): Step[] {
   const src: Record<ServiceName, RepoSha> = { "portal-core": set.portalCore, "portal-gui": set.portalGui, website: set.website };
-  return ORDER.map((service) => ({ service, repo: src[service].repo, sha: src[service].sha, skip: running[service] === src[service].sha }));
+  return ORDER.map((service) => ({
+    service,
+    repo: src[service].repo,
+    sha: src[service].sha,
+    skip: !repoint && running[service] === src[service].sha,
+  }));
 }
 
 /** GitHub combined status → green when the Woodpecker push pipeline context is success. */
@@ -153,14 +162,16 @@ export interface PromotionRecord {
   rollback: string;
 }
 
-export function recordPath(setFile: string, id: string): string {
-  return join(dirname(setFile), `${id}.promoted.json`);
+export function recordPath(setFile: string, id: string, repoint = false): string {
+  return join(dirname(setFile), `${id}.${repoint ? "repointed" : "promoted"}.json`);
 }
 
 export interface Options {
   setFile: string;
   environment: string;
   dryRun: boolean;
+  /** C206: redeploy every service at the set's SHA from its current (org) source, even when it already runs that SHA */
+  repoint: boolean;
 }
 export function parseArgs(argv: readonly string[]): Options {
   const val = (f: string) => {
@@ -170,13 +181,13 @@ export function parseArgs(argv: readonly string[]): Options {
     if (!v || v.startsWith("--")) throw new Error(`${f} needs a value`);
     return v;
   };
-  for (const a of argv) if (a.startsWith("--") && !["--set", "--environment", "--dry-run"].includes(a)) throw new Error(`unknown option ${a}`);
+  for (const a of argv) if (a.startsWith("--") && !["--set", "--environment", "--dry-run", "--repoint"].includes(a)) throw new Error(`unknown option ${a}`);
   const setFile = val("--set");
   if (!setFile) throw new Error("--set <dir>/RS-<n>.json is required");
   if (!SET_ID.test(basename(setFile, ".json"))) throw new Error("the set file must be named RS-<n>.json");
   const environment = val("--environment") ?? "live";
   if (environment === "production") throw new Error('refusing "production": that is DEV; deploy dev with ops/railway-deploy.ts');
-  return { setFile, environment, dryRun: argv.includes("--dry-run") };
+  return { setFile, environment, dryRun: argv.includes("--dry-run"), repoint: argv.includes("--repoint") };
 }
 
 // ---- side effects below (not unit-tested; exercised by --dry-run and the live run) ----
@@ -237,7 +248,9 @@ async function publicUrl(ctx: Ctx, service: ServiceName): Promise<string | null>
     { e: ctx.envId, s: ctx.services[service] },
   );
   const dm = d.serviceInstance?.domains;
-  const host = dm?.customDomains[0]?.domain ?? dm?.serviceDomains[0]?.domain;
+  // C206: smoke the Railway service domain first. A custom domain can sit behind a DNS-level redirect during the cutover
+  // (www.tealbrick.com 301s to the apex until E4), which would fail a correct deployment's smoke.
+  const host = dm?.serviceDomains[0]?.domain ?? dm?.customDomains[0]?.domain;
   return host ? `https://${host}` : null;
 }
 
@@ -315,7 +328,9 @@ async function main(): Promise<void> {
   if (basename(setFile, ".json") !== set.id) throw new Error(`file name ${basename(setFile)} does not match id ${set.id}`);
   if (set.previous && !existsSync(join(dirname(setFile), `${set.previous}.json`)))
     throw new Error(`previous set ${set.previous}.json not found next to ${set.id}`);
-  console.log(`release set ${set.id} → environment ${opts.environment}${opts.dryRun ? " (dry run)" : ""}\n  ${set.notes}`);
+  console.log(
+    `release set ${set.id} → environment ${opts.environment}${opts.dryRun ? " (dry run)" : ""}${opts.repoint ? " (repoint: redeploy every service from its org source)" : ""}\n  ${set.notes}`,
+  );
 
   // Checks (always, also in --dry-run).
   const problems: string[] = [];
@@ -342,7 +357,7 @@ async function main(): Promise<void> {
   const ctx = await context(opts.environment);
   const running: Partial<Record<ServiceName, string | null>> = {};
   for (const s of ORDER) running[s] = await runningSha(ctx, s);
-  const steps = planSteps(set, running);
+  const steps = planSteps(set, running, opts.repoint);
   for (const s of steps)
     console.log(
       `  plan ${s.service.padEnd(11)} ${s.repo}@${s.sha.slice(0, 7)}${s.skip ? "  (already running: skip)" : `  (running: ${running[s.service]?.slice(0, 7) ?? "none"})`}`,
@@ -361,7 +376,7 @@ async function main(): Promise<void> {
     failure: null,
     rollback,
   };
-  const out = recordPath(setFile, set.id);
+  const out = recordPath(setFile, set.id, opts.repoint);
   const save = () => writeFileSync(out, `${JSON.stringify({ ...record, finishedAt: new Date().toISOString() }, null, 2)}\n`);
   try {
     for (const step of steps) {

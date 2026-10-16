@@ -16,7 +16,7 @@
   {
     "id": "release-index",
     "name": "Release index (signed)",
-    "url": "https://github.com/Martin-Atrin/opt2-tealbrick-platform/releases/download/registry/index.jws",
+    "url": "https://github.com/Tealbrick/opt2-tealbrick-platform/releases/download/registry/index.jws",
     "expect": { "status": 200 }
   }
 ]

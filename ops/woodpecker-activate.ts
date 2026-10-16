@@ -9,7 +9,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { PRIVATE_REPOS } from "../ci/tb-ci.ts";
 
-const OWNER = "Martin-Atrin";
+/** C206: the opt2 repos move to the Tealbrick org in batches; during the move some still live under the user account. Each
+ *  repo's CURRENT owner is read from GitHub (first match wins), so one run works before, during and after the move. */
+const OWNERS = ["Tealbrick", "Martin-Atrin"] as const;
 const REPOS = [
   "specs",
   "sdk",
@@ -57,19 +59,49 @@ async function wp(method: string, path: string, body?: unknown): Promise<{ statu
   return { status: res.status, json };
 }
 
-function githubId(repo: string): number {
-  return Number(execFileSync("gh", ["api", `repos/${OWNER}/${repo}`, "-q", ".id"], { encoding: "utf8" }).trim());
+/** The repo as GitHub names it now (owner/name) and its numeric id (unchanged by a transfer). Never a redirect: the API answers
+ *  an old owner path with the moved repo, so full_name is always the current one. */
+function githubRepo(repo: string): { fullName: string; id: number } {
+  for (const owner of OWNERS) {
+    try {
+      const out = execFileSync("gh", ["api", `repos/${owner}/${repo}`, "-q", '.full_name + " " + (.id | tostring)'], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      const [fullName, id] = out.split(" ");
+      if (fullName && id) return { fullName, id: Number(id) };
+    } catch {
+      // not under this owner: try the next
+    }
+  }
+  throw new Error(`${repo}: not found under ${OWNERS.join(" or ")}`);
 }
+const gh = new Map<string, { fullName: string; id: number }>();
+for (const repo of ALL_REPOS) gh.set(repo, githubRepo(repo));
 
 const me = await wp("GET", "/user");
 if (me.status !== 200) throw new Error(`token rejected by Woodpecker (HTTP ${me.status})`);
 console.log(`woodpecker user: ${me.json.login}`);
 
 for (const repo of ALL_REPOS) {
-  const look = await wp("GET", `/repos/lookup/${OWNER}/${repo}`);
+  const cur = gh.get(repo) as { fullName: string; id: number };
+  let look = await wp("GET", `/repos/lookup/${cur.fullName}`);
+  if (look.status !== 200) {
+    // C206: Woodpecker still holds the pre-transfer owner until a repair (POST /repos/<id>/repair) or the next hook
+    for (const owner of OWNERS) {
+      const old = await wp("GET", `/repos/lookup/${owner}/${repo}`);
+      if (old.status === 200) {
+        look = old;
+        console.log(`${repo}: Woodpecker still names it ${old.json?.full_name ?? `${owner}/${repo}`} (GitHub: ${cur.fullName}); run the repair`);
+        break;
+      }
+    }
+  }
+  if (look.status === 200 && look.json?.forge_remote_id !== undefined && String(look.json.forge_remote_id) !== String(cur.id))
+    throw new Error(`${repo}: Woodpecker forge_remote_id ${look.json.forge_remote_id} != GitHub id ${cur.id}; stop and check`);
   let id: number | null = look.status === 200 && look.json?.active ? look.json.id : null;
   if (!id) {
-    const act = await wp("POST", `/repos?forge_remote_id=${githubId(repo)}`);
+    const act = await wp("POST", `/repos?forge_remote_id=${cur.id}`);
     if (act.status !== 200) {
       console.log(`${repo}: activation FAILED (HTTP ${act.status})`);
       continue;
@@ -99,14 +131,31 @@ interface Want {
 }
 const WANT: Want[] = [];
 
-const org = await wp("GET", `/orgs/lookup/${OWNER}`);
-if (org.status !== 200) throw new Error(`org lookup failed (HTTP ${org.status})`);
-for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? []) as { name: string }[]) {
-  const d = await wp("DELETE", `/orgs/${org.json.id}/secrets/${sec.name}`);
-  console.log(`org secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
+// C72: no org-level secrets in the opt2 Woodpecker org. ONLY the Martin-Atrin org (opt2 only). NEVER the Tealbrick org: it is
+// shared with the v1 repos and their own org secrets (C206 incident 2026-10-16: an earlier version of this loop deleted the
+// v1 Tealbrick org secrets registry_host/registry_username/registry_password).
+const CLEAN_ORG_SECRETS_OF = "Martin-Atrin";
+{
+  const org = await wp("GET", `/orgs/lookup/${CLEAN_ORG_SECRETS_OF}`);
+  if (org.status !== 200 && org.status !== 404) throw new Error(`org lookup ${CLEAN_ORG_SECRETS_OF} failed (HTTP ${org.status})`);
+  if (org.status === 200) {
+    for (const sec of ((await wp("GET", `/orgs/${org.json.id}/secrets`)).json ?? []) as { name: string }[]) {
+      const d = await wp("DELETE", `/orgs/${org.json.id}/secrets/${sec.name}`);
+      console.log(`org ${CLEAN_ORG_SECRETS_OF} secret ${sec.name}: ${d.status < 300 ? "deleted (no org-level secrets)" : `DELETE FAILED (HTTP ${d.status})`}`);
+    }
+  }
 }
 const ids = new Map<string, number>();
-for (const repo of ALL_REPOS) ids.set(repo, (await wp("GET", `/repos/lookup/${OWNER}/${repo}`)).json.id as number);
+for (const repo of ALL_REPOS) {
+  for (const name of [(gh.get(repo) as { fullName: string }).fullName, ...OWNERS.map((o) => `${o}/${repo}`)]) {
+    const r = await wp("GET", `/repos/lookup/${name}`);
+    if (r.status === 200) {
+      ids.set(repo, r.json.id as number);
+      break;
+    }
+  }
+  if (!ids.has(repo)) throw new Error(`${repo}: not found in Woodpecker after activation`);
+}
 for (const repo of ALL_REPOS) {
   const id = ids.get(repo) as number;
   const want = WANT.filter((w) => w.repo === repo);
