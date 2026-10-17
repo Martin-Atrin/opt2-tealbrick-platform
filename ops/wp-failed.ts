@@ -41,7 +41,9 @@ const REDACT: RegExp[] = [
 ];
 
 export function redact(line: string, extra: readonly string[] = []): string {
-  let out = line;
+  // terminal control sequences from step output (colours, cursor moves, OSC titles) never reach the reader's terminal
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters is the point
+  let out = line.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
   for (const secret of extra) if (secret.length >= 8) out = out.split(secret).join("[redacted]");
   for (const re of REDACT) out = out.replace(re, "[redacted]");
   return out;
