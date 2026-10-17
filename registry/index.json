@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-16T23:55:35.290Z",
+  "generatedAt": "2026-10-17T04:33:16.727Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -5199,6 +5199,32 @@
       "commit": "0f871157d31edd534675910707c349bb58f6e2d6",
       "tag": "miniapp-sdk-v0.1.25",
       "publishedAt": "2026-10-16T18:09:18.193Z"
+    },
+    {
+      "id": "rel_01M5425BQMZQBT04XBKZZ32MXY",
+      "product": "relay",
+      "kind": "package",
+      "version": "0.1.0",
+      "channel": "stable",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": {
+        "url": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
+        "sha256": "sha256:e371645f788e37143c415f7b9bca76db59149667310cd615baa9ea0a7a9df2d4",
+        "integrity": "sha512-FQQdqhIexEdpYFpQzKwklT8BsapZlUvDcRHWJzQ0IsGk3AHba/DcFs2eBe1GYtpP6Az301HPocA7PVI2mOejVQ=="
+      },
+      "source": null,
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-cli",
+      "commit": "b9b38f244cc7c14732e5a3b60fba564334d9d184",
+      "tag": "relay-v0.1.0",
+      "publishedAt": "2026-10-17T04:33:14.995Z"
     },
     {
       "id": "rel_01M4QYD00KZPTQHX511A1G099X",
