@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-17T04:33:16.727Z",
+  "generatedAt": "2026-10-17T04:39:40.024Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -3456,6 +3456,32 @@
       "tag": "v0.1.10",
       "publishedAt": "2026-10-15T08:31:50.193Z",
       "devOnly": true
+    },
+    {
+      "id": "rel_01M542H199DE7CD4B79T112HE3",
+      "product": "harness-claude",
+      "kind": "package",
+      "version": "0.2.0",
+      "channel": "stable",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": {
+        "url": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-harness-claude-v0.2.0/opt2-tealbrick-harness-claude-0.2.0.tgz",
+        "sha256": "sha256:35679a4bffeaad229340a53ef697a06be48966eaef31f87c935f468f61a30400",
+        "integrity": "sha512-PgXexd+sBQdFYarWv5i/SJmzu5hnvY9E/afZZsDPOoPmN//LgrQQ7Y5YmJuB+3dg4baaqYRtdXHd9CxuSJDD5w=="
+      },
+      "source": null,
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-cli",
+      "commit": "5dbb48f4aa9dfe8f8bab5bad09906bcf763c5e72",
+      "tag": "harness-claude-v0.2.0",
+      "publishedAt": "2026-10-17T04:39:37.511Z"
     },
     {
       "id": "rel_01M52QWF1K0S9507V1V0PHKYNF",
