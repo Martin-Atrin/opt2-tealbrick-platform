@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-17T04:39:40.024Z",
+  "generatedAt": "2026-10-17T04:44:01.643Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -3508,6 +3508,32 @@
       "commit": "bfacd8815e5b60abc63b7f7f74d8c3d2129068b5",
       "tag": "harness-claude-v0.1.0",
       "publishedAt": "2026-10-16T16:14:23.282Z"
+    },
+    {
+      "id": "rel_01M542S1F8C2FCV6BYDC4PRYDG",
+      "product": "harness-eve",
+      "kind": "package",
+      "version": "0.2.0",
+      "channel": "stable",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": {
+        "url": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-harness-eve-v0.2.0/opt2-tealbrick-harness-eve-0.2.0.tgz",
+        "sha256": "sha256:154019fceaa37ff27be26755326e1271adb10fbbe0a95f6be6343020f0e41448",
+        "integrity": "sha512-ZSgVlxSqBJEeTW490rKvSP8ZraqgBBijMjWAdcV3yX3nGYYXPAK2Ed7j1rf1tPvHZPHwyO2NaSa+m7E+a+jmZQ=="
+      },
+      "source": null,
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-cli",
+      "commit": "5dbb48f4aa9dfe8f8bab5bad09906bcf763c5e72",
+      "tag": "harness-eve-v0.2.0",
+      "publishedAt": "2026-10-17T04:43:59.847Z"
     },
     {
       "id": "rel_01M4QYHWDR92AEA23MEZET9G0K",
