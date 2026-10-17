@@ -6,6 +6,7 @@
   "conformance": { "repo": "Tealbrick/opt2-tealbrick-sdk", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-sdk"] },
   "connect": { "repo": "Tealbrick/opt2-tealbrick-connect", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-connect"] },
   "create-tealbrick-miniapp": { "repo": "Tealbrick/opt2-tealbrick-sdk", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-sdk"] },
+  "creative": { "repo": "Tealbrick/opt2-tealbrick-creative", "kind": "app" },
   "evolution": { "repo": "Tealbrick/opt2-tealbrick-evolution", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-evolution"] },
   "fleet": { "repo": "Tealbrick/opt2-tealbrick-fleet", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-fleet"] },
   "harness-claude": { "repo": "Tealbrick/opt2-tealbrick-cli", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-cli"] },
