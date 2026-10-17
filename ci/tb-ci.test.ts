@@ -1544,6 +1544,8 @@ test("C154: an unreadable private repo is a loud registry-sync rejection naming 
   // 2026-10-17: a new mini app repo is built privately before its first release (activated private, outside OPT2_REPOS)
   assert.ok(/const ACTIVATE_PRIVATE[^=]*= \[[^\]]*"opt2-tealbrick-live-artifacts"/.test(activate), "Live Artifacts repo activated as private");
   assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-live-artifacts"), "Live Artifacts joins OPT2_REPOS only with its public flip");
+  assert.ok(/const ACTIVATE_PRIVATE[^=]*= \[[^\]]*"opt2-tealbrick-observer"/.test(activate), "Observer repo activated as private");
+  assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-observer"), "Observer joins OPT2_REPOS only with its public flip");
   assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-admin"), "the Admin GUI repo is not an opt2 release repo");
 });
 
