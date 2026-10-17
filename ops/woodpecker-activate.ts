@@ -3,6 +3,8 @@
 // Reads tokens from files (never argv, never printed):
 //   ~/.config/opt2-tealbrick/woodpecker-token   Woodpecker personal access token (required)
 // Secrets (C72): Woodpecker holds none; the script deletes any org-level or repo secret it finds. See ci/README.md.
+// C222 exception: KEEP lists hand-made repo secrets (Martin creates them in the Woodpecker UI). The script never deletes,
+// writes or reads their value; it only checks their event filter.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -130,6 +132,15 @@ interface Want {
   events: string[];
 }
 const WANT: Want[] = [];
+/** C222 (template ci-v9.10): repo secrets made by hand and used ONLY by the publish step of .woodpecker/release.yaml. Never
+ *  deleted or written here; the script warns when the event filter is not exactly these events or an image filter is set
+ *  (Woodpecker refuses image-filtered secrets on command steps). */
+interface Keep {
+  repo: string;
+  name: string;
+  events: string[];
+}
+const KEEP: Keep[] = [{ repo: "opt2-tealbrick-cli", name: "tb_release_token", events: ["manual", "tag"] }];
 
 // C72: no org-level secrets in the opt2 Woodpecker org. ONLY the Martin-Atrin org (opt2 only). NEVER the Tealbrick org: it is
 // shared with the v1 repos and their own org secrets (C206 incident 2026-10-16: an earlier version of this loop deleted the
@@ -159,7 +170,20 @@ for (const repo of ALL_REPOS) {
 for (const repo of ALL_REPOS) {
   const id = ids.get(repo) as number;
   const want = WANT.filter((w) => w.repo === repo);
-  for (const sec of ((await wp("GET", `/repos/${id}/secrets`)).json ?? []) as { name: string }[]) {
+  const keep = KEEP.filter((k) => k.repo === repo);
+  const listed = ((await wp("GET", `/repos/${id}/secrets`)).json ?? []) as { name: string; events?: string[]; images?: string[] }[];
+  for (const k of keep) {
+    const sec = listed.find((s) => s.name === k.name);
+    if (!sec) {
+      console.log(`${repo} secret ${k.name}: MISSING (C222: Martin creates it; see coordination/leads/platform/WOODPECKER-RELEASE.md)`);
+      continue;
+    }
+    const events = [...(sec.events ?? [])].sort();
+    const ok = events.join(",") === [...k.events].sort().join(",") && (sec.images ?? []).length === 0;
+    console.log(`${repo} secret ${k.name}: kept (hand-made, C222) [${events.join(",")}]${ok ? "" : ` WARNING: want events [${k.events.join(",")}] and no image filter`}`);
+  }
+  for (const sec of listed) {
+    if (keep.some((k) => k.name === sec.name)) continue;
     if (!want.some((w) => w.name === sec.name)) {
       const d = await wp("DELETE", `/repos/${id}/secrets/${sec.name}`);
       console.log(`${repo} secret ${sec.name}: ${d.status < 300 ? "deleted (not needed here)" : `DELETE FAILED (HTTP ${d.status})`}`);
