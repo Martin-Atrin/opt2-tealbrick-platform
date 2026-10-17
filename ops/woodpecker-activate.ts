@@ -135,7 +135,8 @@ interface Want {
   events: string[];
 }
 const WANT: Want[] = [];
-/** C222 (template ci-v9.10): repo secrets made by hand and used ONLY by the publish step of .woodpecker/release.yaml. Never
+/** C222 (template ci-v9.10, C232 ci-v9.11): repo secrets made by hand and used ONLY by one step of .woodpecker/release.yaml each
+ *  (release-publish: tb_release_token; release-image-push: tb_ghcr_token). Never
  *  deleted or written here; the script warns when the event filter is not exactly these events or an image filter is set
  *  (Woodpecker refuses image-filtered secrets on command steps). */
 interface Keep {
@@ -143,7 +144,13 @@ interface Keep {
   name: string;
   events: string[];
 }
-const KEEP: Keep[] = [{ repo: "opt2-tealbrick-cli", name: "tb_release_token", events: ["manual", "tag"] }];
+// C232 (template ci-v9.11): the bridge repo releases its image on Woodpecker. tb_ghcr_token (classic PAT, write:packages only, of the
+// machine user) is read ONLY by the release-image-push step; tb_release_token (publish step) is the same as in the cli repo.
+const KEEP: Keep[] = [
+  { repo: "opt2-tealbrick-cli", name: "tb_release_token", events: ["manual", "tag"] },
+  { repo: "opt2-tealbrick-bridge", name: "tb_release_token", events: ["manual", "tag"] },
+  { repo: "opt2-tealbrick-bridge", name: "tb_ghcr_token", events: ["manual", "tag"] },
+];
 
 // C72: no org-level secrets in the opt2 Woodpecker org. ONLY the Martin-Atrin org (opt2 only). NEVER the Tealbrick org: it is
 // shared with the v1 repos and their own org secrets (C206 incident 2026-10-16: an earlier version of this loop deleted the

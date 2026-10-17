@@ -54,7 +54,7 @@
     "releaseOn": {
       "enum": ["actions", "woodpecker"],
       "default": "actions",
-      "description": "ci-v9.10 (C222): who publishes this repo's releases. \"actions\" (default): .github/workflows/opt2-release.yml (built-in GITHUB_TOKEN; free only in PUBLIC repos). \"woodpecker\": .woodpecker/release.yaml (a private repo: GitHub Actions do not start without billing). The Woodpecker release builds without any token and publishes with the repo secret tb_release_token (tag + manual events only). ci-v9.10: package tarballs only (no images); setup requires exactly one of the two release files."
+      "description": "ci-v9.10 (C222): who publishes this repo's releases. \"actions\" (default): .github/workflows/opt2-release.yml (built-in GITHUB_TOKEN; free only in PUBLIC repos). \"woodpecker\": .woodpecker/release.yaml (a private repo: GitHub Actions do not start without billing). The Woodpecker release builds without any token and publishes with the repo secret tb_release_token (tag + manual events only). ci-v9.11 (C232): images are allowed; they are built by kaniko (no push) and pushed to ghcr by the release-image-push step alone, with the repo secret tb_ghcr_token (a classic PAT, write:packages only, tag + manual events only). Setup requires exactly one of the two release files."
     },
     "images": {
       "type": "array",
