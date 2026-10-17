@@ -1540,7 +1540,10 @@ test("C154: an unreadable private repo is a loud registry-sync rejection naming 
   assert.ok(activate.includes('PRIVATE_REPOS.includes(repo) ? "private" : "public"'), "Woodpecker visibility follows PRIVATE_REPOS");
   assert.ok(!activate.includes('visibility: "public"'), "no repo is forced public in Woodpecker");
   // C203: the private Admin GUI repo is activated with private logs, outside OPT2_REPOS (it publishes nothing)
-  assert.ok(/const ACTIVATE_PRIVATE[^=]*= \["opt2-tealbrick-admin"\]/.test(activate), "Admin GUI repo activated as private");
+  assert.ok(/const ACTIVATE_PRIVATE[^=]*= \["opt2-tealbrick-admin"[,\]]/.test(activate), "Admin GUI repo activated as private");
+  // 2026-10-17: a new mini app repo is built privately before its first release (activated private, outside OPT2_REPOS)
+  assert.ok(/const ACTIVATE_PRIVATE[^=]*= \[[^\]]*"opt2-tealbrick-live-artifacts"/.test(activate), "Live Artifacts repo activated as private");
+  assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-live-artifacts"), "Live Artifacts joins OPT2_REPOS only with its public flip");
   assert.ok(!OPT2_REPOS.includes("opt2-tealbrick-admin"), "the Admin GUI repo is not an opt2 release repo");
 });
 

@@ -14,6 +14,7 @@
   "inbox": { "repo": "Tealbrick/opt2-tealbrick-inbox", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-inbox"] },
   "kanban": { "repo": "Tealbrick/opt2-tealbrick-kanban", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-kanban"] },
   "knowledge": { "repo": "Tealbrick/opt2-tealbrick-knowledge", "kind": "app", "formerRepos": ["Martin-Atrin/opt2-tealbrick-knowledge"] },
+  "live-artifacts": { "repo": "Tealbrick/opt2-tealbrick-live-artifacts", "kind": "app" },
   "manifest": { "repo": "Tealbrick/opt2-tealbrick-sdk", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-sdk"] },
   "miniapp-sdk": { "repo": "Tealbrick/opt2-tealbrick-sdk", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-sdk"] },
   "relay": { "repo": "Tealbrick/opt2-tealbrick-cli", "kind": "package", "formerRepos": ["Martin-Atrin/opt2-tealbrick-cli"] },
