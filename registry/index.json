@@ -1,6 +1,6 @@
 {
   "schema": "opt2.release-index/v2",
-  "generatedAt": "2026-10-17T13:28:41.149Z",
+  "generatedAt": "2026-10-17T13:58:55.697Z",
   "releases": [
     {
       "id": "rel_01M4NBT0WBKCMFBFNTJG0BF3PR",
@@ -5191,6 +5191,32 @@
       "commit": "6e6ce46f5eb65e5c2aaf954a268987f6cb112994",
       "tag": "manifest-v0.1.19",
       "publishedAt": "2026-10-17T12:58:16.273Z"
+    },
+    {
+      "id": "rel_01M552H3A3BR0HDWGWR6NXSEPN",
+      "product": "manifest",
+      "kind": "package",
+      "version": "0.1.20",
+      "channel": "stable",
+      "manifestDigest": null,
+      "manifestUrl": null,
+      "skillsDigest": null,
+      "image": null,
+      "artifact": {
+        "url": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.20/opt2-tealbrick-manifest-0.1.20.tgz",
+        "sha256": "sha256:62304a4bfa77d8da93cbe1336af28ffa5d1d81814e75ba51d9556ea78ea9f952",
+        "integrity": "sha512-sHPqZbRTTzldMBo7o0vf40MMBOqoGjgIrIP/FLBVjY6/DOEVb7YY8cnjyQjUXFIpBPfHgO35idLWu9KqkkUorw=="
+      },
+      "source": null,
+      "runtime": null,
+      "services": null,
+      "minOs": null,
+      "notarized": null,
+      "upgradeFrom": "*",
+      "repo": "Tealbrick/opt2-tealbrick-sdk",
+      "commit": "840c6fd8bcade4848a10ecd83ac43034c34a8dd0",
+      "tag": "manifest-v0.1.20",
+      "publishedAt": "2026-10-17T13:58:54.016Z"
     },
     {
       "id": "rel_01M52QVQY3726CAVNMZ3V0T48M",
