@@ -11,6 +11,7 @@ import {
   addPnpmIntegrity,
   artifactSource,
   assetChecksums,
+  assetDecision,
   auditVerdict,
   belowMinimum,
   CLI_DIST_BASE,
@@ -36,6 +37,7 @@ import {
   dockerfileInstallProblems,
   dockerfileVolumeLines,
   expectedGenFiles,
+  GH_WORKFLOW_PATH,
   ghcrFind,
   IMAGE_NAMESPACE,
   IMAGE_NAMESPACES,
@@ -79,6 +81,7 @@ import {
   promotionReleases,
   REGISTRY_EXTRA_ASSETS,
   releaseChannel,
+  releaseFileProblems,
   releaseGuard,
   releaseUrl,
   renderImagesScript,
@@ -105,7 +108,10 @@ import {
   verifyImageProvenance,
   verifyOwnerRewrites,
   versionFromTag,
+  WP_RELEASE_PATH,
+  WP_RELEASE_SECRET,
   workspaceGlobs,
+  wpReleaseTarget,
 } from "./tb-ci.ts";
 
 const repo = "opt2-tealbrick-knowledge";
@@ -1151,9 +1157,9 @@ test("ci-v9.6 pre-release step: no-op without checks, passes a good gate, fails 
 test("ci-v9.6 template: pre-release step after gen; image-check and release-record wait for it; workflow runs the checks on the tag", () => {
   const tpl = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
   assert.equal(stepScript(tpl, "pre-release"), "node .tb-ci/tb-ci.ts pre-release");
-  assert.match(tpl.split("\n")[0] as string, /ci-v9\.9/, "current template (ci-v9.9 keeps the ci-v9.6 pre-release step)");
+  assert.match(tpl.split("\n")[0] as string, /ci-v9\.10/, "current template (ci-v9.10 keeps the ci-v9.6 pre-release step)");
   const wf = readFileSync(new URL("./github/opt2-release.yml", import.meta.url), "utf8");
-  assert.match(wf, /TB_CI_REF: ci-v9\.9/);
+  assert.match(wf, /TB_CI_REF: ci-v9\.10/);
   const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
   const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
   assert.ok(build.indexOf("runPreReleaseChecks(cfg, root)") > 0, "gh-build runs the checks on the tag");
@@ -2046,4 +2052,146 @@ test("C207 E4: new app/bridge tags land on dev; stable only by a recorded promot
   assert.throws(() => validatePromotions([p, p]), /twice/);
   const committed = JSON.parse(readFileSync(new URL("../registry/promotions.json", import.meta.url), "utf8"));
   assert.doesNotThrow(() => validatePromotions(committed));
+});
+
+// ---------- ci-v9.10 (C222): releases of private repos on Woodpecker ----------
+
+const sha40 = (c: string) => c.repeat(40);
+
+test("ci-v9.10 C222: releaseOn config field (default actions; woodpecker = package tarballs only)", () => {
+  assert.equal(validateConfig({ kind: "library" }, repo).releaseOn, "actions");
+  assert.equal(validateConfig({ kind: "library", releaseOn: "woodpecker" }, repo).releaseOn, "woodpecker");
+  assert.throws(() => validateConfig({ kind: "library", releaseOn: "github" }, repo), /releaseOn/);
+  assert.throws(
+    () =>
+      validateConfig(
+        { kind: "miniapp", releaseOn: "woodpecker", images: [{ name: repo, product: "knowledge", kind: "app", manifest: "tealbrick.manifest.json" }] },
+        repo,
+      ),
+    /package tarballs only/,
+  );
+  const schema = JSON.parse(readFileSync(new URL("./tealbrick-ci.schema.json", import.meta.url), "utf8")) as {
+    properties: { releaseOn: { enum: string[] } };
+  };
+  assert.deepEqual(schema.properties.releaseOn.enum, ["actions", "woodpecker"]);
+});
+
+test("ci-v9.10 C222: exactly one release publisher per repo", () => {
+  assert.deepEqual(releaseFileProblems("woodpecker", true, false, true), []);
+  assert.match(releaseFileProblems("woodpecker", true, true, true).join(), /must not exist/);
+  assert.match(releaseFileProblems("woodpecker", true, false, false).join(), /release\.yaml is required/);
+  assert.deepEqual(releaseFileProblems("actions", true, true, false), []);
+  assert.deepEqual(releaseFileProblems("actions", false, false, false), [], "a repo that releases nothing needs no release file");
+  assert.match(releaseFileProblems("actions", true, false, false).join(), /opt2-release\.yml is required/);
+  assert.match(releaseFileProblems("actions", false, false, true).join(), /needs "releaseOn": "woodpecker"/);
+  assert.equal(GH_WORKFLOW_PATH, ".github/workflows/opt2-release.yml");
+  assert.equal(WP_RELEASE_PATH, ".woodpecker/release.yaml");
+});
+
+test("ci-v9.10 C222: release target = the pipeline tag, or an EXISTING tag on a manual run from main; never a new tag", () => {
+  const tags: Record<string, string> = { "relay-v0.1.0": sha40("b"), "v1.2.3": sha40("c") };
+  const look = (t: string) => tags[t] ?? null;
+  const base = { event: "tag", branch: "", commitTag: "relay-v0.1.0", commitSha: sha40("b"), releaseTag: "" };
+  assert.deepEqual(wpReleaseTarget(base, look), { tag: "relay-v0.1.0", commit: sha40("b") });
+  assert.match(String(wpReleaseTarget({ ...base, commitSha: sha40("e") }, look)), /points at/);
+  assert.match(String(wpReleaseTarget({ ...base, releaseTag: "v1.2.3" }, look)), /!= the pipeline tag/);
+  const manual = { event: "manual", branch: "main", commitTag: "", commitSha: sha40("f"), releaseTag: "relay-v0.1.0" };
+  assert.deepEqual(wpReleaseTarget(manual, look), { tag: "relay-v0.1.0", commit: sha40("b") }, "manual: the tag's commit, not main's");
+  assert.match(String(wpReleaseTarget({ ...manual, branch: "feature" }, look)), /main only/);
+  assert.match(String(wpReleaseTarget({ ...manual, releaseTag: "" }, look)), /TB_RELEASE_TAG/);
+  assert.match(String(wpReleaseTarget({ ...manual, releaseTag: "relay-v0.9.9" }, look)), /does not exist/);
+  assert.match(String(wpReleaseTarget({ ...manual, releaseTag: "ci-v9.10" }, look)), /not v<semver>/);
+  assert.match(String(wpReleaseTarget({ ...manual, releaseTag: "x; rm -rf /" }, look)), /not v<semver>/);
+  assert.match(String(wpReleaseTarget({ ...manual, event: "push" }, look)), /tag and manual events only/);
+  assert.match(String(wpReleaseTarget({ ...manual, event: "pull_request" }, look)), /tag and manual events only/);
+});
+
+test("ci-v9.10 C222: a published asset is never replaced", () => {
+  const a = new TextEncoder().encode("a");
+  assert.equal(assetDecision(null, a), "upload");
+  assert.equal(assetDecision(new TextEncoder().encode("a"), a), "same");
+  assert.equal(assetDecision(new TextEncoder().encode("b"), a), "conflict");
+  const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const pub = runner.slice(runner.indexOf("async function publishAssetOnce"), runner.indexOf("async function cmdWpPublish"));
+  assert.ok(!pub.includes('"DELETE"'), "the Woodpecker publish never deletes an asset");
+  const wp = runner.slice(runner.indexOf("async function cmdWpPublish"), runner.indexOf("function cmdPlanImages"));
+  assert.ok(wp.indexOf("sums.files") < wp.indexOf("publishAssetOnce(full, rel, name, data"), "checksum files before the tarball");
+  assert.ok(!wp.includes("putAsset"), "no replace path");
+});
+
+test("ci-v9.10 C222 template: release.yaml = build without secret, publish runs no repo code and alone reads the secret", () => {
+  const rel = readFileSync(new URL("./woodpecker/release.yaml", import.meta.url), "utf8");
+  const ci = readFileSync(new URL("./woodpecker/ci.yaml", import.meta.url), "utf8");
+  assert.match(rel.split("\n")[0] as string, /template ci-v9\.10/);
+  assert.match(rel, /GENERATED from Tealbrick\/opt2-tealbrick-platform: ci\/woodpecker\/release\.yaml/);
+  const ref = /TB_CI_REF: (\S+)/.exec(ci)?.[1];
+  const sha = /TB_CI_SHA256: "([0-9a-f]{64})"/.exec(ci)?.[1];
+  for (const m of rel.matchAll(/TB_CI_REF: (\S+)/g)) assert.equal(m[1], ref, "same ref as ci.yaml");
+  for (const m of rel.matchAll(/TB_CI_SHA256: "([^"]*)"/g)) assert.equal(m[1], sha, "same runner sha256 as ci.yaml");
+  assert.equal(
+    createHash("sha256")
+      .update(readFileSync(new URL("./tb-ci.ts", import.meta.url)))
+      .digest("hex"),
+    sha,
+    "stamped",
+  );
+  assert.match(rel, /^depends_on: \[ci\]$/m, "runs only after a green ci workflow");
+  // events: tag, and manual on main with TB_RELEASE_TAG; never push or pull_request
+  const when = rel.slice(rel.indexOf("\nwhen:"), rel.indexOf("\ndepends_on:"));
+  assert.deepEqual(
+    [...when.matchAll(/event: (\S+)/g)].map((m) => m[1]),
+    ["tag", "tag", "manual"],
+  );
+  assert.match(when, /branch: main/);
+  assert.match(when, /evaluate: '\(TB_RELEASE_TAG \?\? ""\) != ""'/);
+  assert.match(rel, /image: docker\.io\/woodpeckerci\/plugin-git:2\.10\.1/, "the default trusted clone image (gets the netrc)");
+  assert.match(rel, /tags: true/);
+  const steps = rel.slice(rel.indexOf("\nsteps:"));
+  const build = steps.slice(steps.indexOf("- name: release-build"), steps.indexOf("- name: release-publish"));
+  const publish = steps.slice(steps.indexOf("- name: release-publish"));
+  assert.ok(!build.includes("from_secret"), "the build step never sees a secret");
+  assert.equal([...rel.matchAll(/from_secret: (\S+)/g)].map((m) => m[1]).join(), WP_RELEASE_SECRET, "one secret, publish step only");
+  assert.match(publish, /depends_on: \[release-build\]/);
+  const pubScript = stepScript(`${publish}\n\n`, "release-publish").split("\n");
+  assert.deepEqual(pubScript.slice(1, 4), [
+    "cd /tmp",
+    'curl -fsSL "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/$TB_CI_REF/ci/tb-ci.ts" -o /tmp/tb-ci.ts',
+    'echo "$TB_CI_SHA256  /tmp/tb-ci.ts" | sha256sum -c -',
+  ]);
+  assert.equal(pubScript[4], 'TB_OUT="$OUT" node /tmp/tb-ci.ts wp-publish', "a fresh runner outside the workspace; out/ is data");
+  assert.equal(stepScript(build, "release-build").split("\n").at(-1), "node .tb-ci/tb-ci.ts wp-build");
+  const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const imports = runner.match(/^import .* from "([^"]+)";$/gm) ?? [];
+  assert.ok(imports.length > 0 && imports.every((l) => /from "node:/.test(l)), "the runner imports node: built-ins only (nothing from the workspace)");
+});
+
+test("ci-v9.10 C222: wp-build refuses tokens and non-main manual runs; wp-publish refuses to run inside the workspace", () => {
+  const work = mkdtempSync(join(tmpdir(), "tb-wp-"));
+  try {
+    const runner = new URL("./tb-ci.ts", import.meta.url).pathname;
+    const run = (cmd: string, env: Record<string, string>, cwd = work) => {
+      try {
+        execFileSync(process.execPath, [runner, cmd], { cwd, env: { PATH: process.env.PATH ?? "", CI_WORKSPACE: work, ...env }, stdio: "pipe" });
+        return { code: 0, out: "" };
+      } catch (e) {
+        const x = e as { status: number; stderr: Buffer };
+        return { code: x.status, out: x.stderr.toString() };
+      }
+    };
+    const tok = run("wp-build", { GITHUB_TOKEN: "x", CI_PIPELINE_EVENT: "tag" });
+    assert.notEqual(tok.code, 0);
+    assert.match(tok.out, /wp-build must run without GITHUB_TOKEN/);
+    const branch = run("wp-build", { CI_PIPELINE_EVENT: "manual", CI_COMMIT_BRANCH: "dev", TB_RELEASE_TAG: "relay-v0.1.0" });
+    assert.match(branch.out, /main only/);
+    const inside = run("wp-publish", { TB_OUT: join(work, ".tb-ci/out"), GITHUB_TOKEN: "x", CI_REPO_NAME: "opt2-tealbrick-cli" });
+    assert.match(inside.out, /outside the workspace/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("ci-v9.10 C222: the Actions release refuses a repo that releases on Woodpecker", () => {
+  const runner = readFileSync(new URL("./tb-ci.ts", import.meta.url), "utf8");
+  const build = runner.slice(runner.indexOf("async function cmdGhBuild"), runner.indexOf("async function cmdGhPublish"));
+  assert.match(build, /cfg\.releaseOn === "woodpecker" && !wpBuildActive/);
 });

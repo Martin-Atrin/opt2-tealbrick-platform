@@ -51,6 +51,11 @@
       "additionalProperties": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+\\.ts$" },
       "description": "ci-v9.7: { \"<package dir>\": \"<repo-relative .ts>\" }. On a <dir>-v<semver> tag the release Action runs `node <script> --out <empty dir>` from the repo root (after install, build and preReleaseChecks; no tokens) instead of the template's npm pack. The script must write exactly <scope-name>-<version>.tgz of the tagged package; the template checks name/version and the pack guard and publishes .tgz + .sha256 + .integrity computed from the bytes."
     },
+    "releaseOn": {
+      "enum": ["actions", "woodpecker"],
+      "default": "actions",
+      "description": "ci-v9.10 (C222): who publishes this repo's releases. \"actions\" (default): .github/workflows/opt2-release.yml (built-in GITHUB_TOKEN; free only in PUBLIC repos). \"woodpecker\": .woodpecker/release.yaml (a private repo: GitHub Actions do not start without billing). The Woodpecker release builds without any token and publishes with the repo secret tb_release_token (tag + manual events only). ci-v9.10: package tarballs only (no images); setup requires exactly one of the two release files."
+    },
     "images": {
       "type": "array",
       "items": {

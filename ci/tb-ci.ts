@@ -13,6 +13,8 @@
 //   pin-tarballs [<repoDir>]    (local) pin sha512 of GitHub-release tarballs the lockfile has no integrity for (S3)
 //   package-pack                (tag <pkg>-v*) npm pack --ignore-scripts without tokens, then the pack guard (used by gh-build after the build)
 //   gh-build / gh-publish       (C72, GitHub Actions) build without a write token / push images + attach assets, no repo code
+//   wp-build / wp-publish       (C222, Woodpecker .woodpecker/release.yaml) the same split for private repos: build with no
+//                               token / attach assets with the repo secret tb_release_token, no repo code, never replace an asset
 //   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index (GitHub asset URL or a platform dist host)
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
 //   registry-add-source ...     (C29 interim) dev entry built from source at a pushed commit
@@ -23,7 +25,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -169,7 +171,10 @@ export interface CiConfig {
   distBaseUrl: string | null; // ci-v9.6: public dist host base for dependency URLs of this repo's releases (null = GitHub releases of the repo)
   preReleaseChecks: string[]; // ci-v9.6: repo-relative .ts scripts the pipeline runs before a release can be tagged
   packScripts: Record<string, string>; // ci-v9.7: package dir -> repo-relative .ts that builds that package's release tarball
+  releaseOn: ReleaseOn; // ci-v9.10 (C222): who publishes releases: GitHub Actions (public repos) or Woodpecker (private repos)
 }
+/** ci-v9.10 (C222): "actions" = .github/workflows/opt2-release.yml (free only in public repos); "woodpecker" = .woodpecker/release.yaml. */
+export type ReleaseOn = "actions" | "woodpecker";
 
 /** PORTAL-API Release (types/routes.ts `Release`) plus provenance fields. */
 export type Channel = "stable" | "dev";
@@ -724,7 +729,7 @@ export function versionFromTag(tag: string): string {
 export function validateConfig(raw: unknown, repoName: string): CiConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("tealbrick-ci.json must be an object");
   const o = raw as Record<string, unknown>;
-  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres", "distBaseUrl", "preReleaseChecks", "packScripts"]);
+  const allowed = new Set(["$schema", "kind", "paths", "conformance", "images", "postgres", "distBaseUrl", "preReleaseChecks", "packScripts", "releaseOn"]);
   for (const k of Object.keys(o)) if (!allowed.has(k)) throw new Error(`unknown field ${k}`);
   if (!KINDS.includes(o.kind as Kind)) throw new Error(`kind must be one of ${KINDS.join(", ")}`);
   const kind = o.kind as Kind;
@@ -738,6 +743,8 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
   const distBaseUrl = o.distBaseUrl === undefined ? null : normalizeDistBase(o.distBaseUrl, "distBaseUrl");
   const preReleaseChecks = parsePreReleaseChecks(o.preReleaseChecks);
   const packScripts = parsePackScripts(o.packScripts);
+  const releaseOn = o.releaseOn === undefined ? "actions" : o.releaseOn;
+  if (releaseOn !== "actions" && releaseOn !== "woodpecker") throw new Error('releaseOn must be "actions" or "woodpecker"');
   const imagesRaw = o.images === undefined ? [] : o.images;
   if (!Array.isArray(imagesRaw)) throw new Error("images must be a list");
   const names = new Set<string>();
@@ -783,7 +790,11 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
       throw new Error(`service ${im.product}/${im.service} declared twice`);
   }
-  return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks, packScripts };
+  if (releaseOn === "woodpecker" && images.length > 0)
+    throw new Error(
+      'releaseOn "woodpecker" publishes package tarballs only in ci-v9.10; images still need the Actions release (GHCR credential, C222 follow-up)',
+    );
+  return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks, packScripts, releaseOn };
 }
 
 function safeRel(p: string): boolean {
@@ -1945,11 +1956,18 @@ async function cmdSetup(): Promise<void> {
   {
     const cfgEarly = loadConfig(root);
     const wfPath = join(root, GH_WORKFLOW_PATH);
-    if (repoReleases(cfgEarly, root) || existsSync(wfPath)) {
-      if (!existsSync(wfPath)) fail(`${GH_WORKFLOW_PATH} is required for a releasing repo (C72): re-run adopt`);
+    const wpPath = join(root, WP_RELEASE_PATH);
+    const problems = releaseFileProblems(cfgEarly.releaseOn, repoReleases(cfgEarly, root), existsSync(wfPath), existsSync(wpPath));
+    if (problems.length) fail(problems.join("; "));
+    if (existsSync(wfPath)) {
       const wfUp = await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/${ref}/ci/github/opt2-release.yml`);
       if (readFileSync(wfPath, "utf8") !== wfUp) fail(`${GH_WORKFLOW_PATH} differs from the platform template ${ref}; re-run adopt`);
       log(`release workflow ${ref}: identical`);
+    }
+    if (existsSync(wpPath)) {
+      const wpUp = await fetchText(`https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/${ref}/ci/woodpecker/release.yaml`);
+      if (readFileSync(wpPath, "utf8") !== wpUp) fail(`${WP_RELEASE_PATH} differs from the platform template ${ref}; re-run adopt`);
+      log(`Woodpecker release workflow ${ref}: identical (C222)`);
     }
   }
   const cfg = loadConfig(root);
@@ -2216,6 +2234,26 @@ async function cmdAuditTemplates(): Promise<void> {
 // ---------- GitHub Actions release publishing (C72): no personal token ----------
 
 export const GH_WORKFLOW_PATH = ".github/workflows/opt2-release.yml";
+/** ci-v9.10 (C222): the Woodpecker release workflow of repos with "releaseOn": "woodpecker" (byte copy of ci/woodpecker/release.yaml). */
+export const WP_RELEASE_PATH = ".woodpecker/release.yaml";
+/** ci-v9.10 (C222): the Woodpecker repo secret the release-publish step (and only that step) reads. Created by Martin by hand. */
+export const WP_RELEASE_SECRET = "tb_release_token";
+
+/** ci-v9.10 (C222): exactly one publisher per tag. Pure. */
+export function releaseFileProblems(releaseOn: ReleaseOn, releases: boolean, hasGhWorkflow: boolean, hasWpRelease: boolean): string[] {
+  const out: string[] = [];
+  if (releaseOn === "woodpecker") {
+    if (hasGhWorkflow)
+      out.push(
+        `${GH_WORKFLOW_PATH} must not exist with "releaseOn": "woodpecker" (C222: one publisher per tag; Actions do not start in private repos): re-run adopt`,
+      );
+    if (!hasWpRelease) out.push(`${WP_RELEASE_PATH} is required with "releaseOn": "woodpecker" (C222): re-run adopt`);
+  } else {
+    if (hasWpRelease) out.push(`${WP_RELEASE_PATH} needs "releaseOn": "woodpecker" in tealbrick-ci.json (one publisher per tag)`);
+    if ((releases || hasGhWorkflow) && !hasGhWorkflow) out.push(`${GH_WORKFLOW_PATH} is required for a releasing repo (C72): re-run adopt`);
+  }
+  return out;
+}
 const KIT_NAME_RE = /^opt2-tealbrick-[a-z0-9-]+-kit-\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?\.tgz$/;
 const PKG_NAME_RE = /^[a-z0-9-]+-\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?\.tgz$/;
 
@@ -2237,6 +2275,8 @@ export interface GhPlan {
 async function cmdGhBuild(): Promise<void> {
   const root = repoRoot();
   const cfg = loadConfig(root);
+  if (cfg.releaseOn === "woodpecker" && !wpBuildActive)
+    fail('C222: this repo releases on Woodpecker ("releaseOn": "woodpecker"); the GitHub Actions release must not publish it too');
   const repo = repoName(root);
   const tag = process.env.CI_COMMIT_TAG;
   const commit = process.env.CI_COMMIT_SHA;
@@ -2371,6 +2411,189 @@ async function cmdGhPublish(): Promise<void> {
     }
   }
   log(`gh-publish: done (${plan.images.length} image(s), ${plan.assets.length} asset(s))`);
+}
+
+// ---------- Woodpecker release publishing (C222): private repos, no GitHub Actions ----------
+
+/** Set by wp-build only: cmdGhBuild then builds a repo whose config says releaseOn "woodpecker" (or an older tag of it). */
+let wpBuildActive = false;
+const RELEASE_TAG_RE = /^(v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?|[a-z0-9][a-z0-9-]*-v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)$/;
+
+export interface WpReleaseEnv {
+  event: string; // CI_PIPELINE_EVENT
+  branch: string; // CI_COMMIT_BRANCH (manual pipelines)
+  commitTag: string; // CI_COMMIT_TAG (tag pipelines)
+  commitSha: string; // CI_COMMIT_SHA
+  releaseTag: string; // TB_RELEASE_TAG (manual pipelines: re-release an existing tag)
+}
+
+export function wpReleaseEnv(env: NodeJS.ProcessEnv): WpReleaseEnv {
+  return {
+    event: env.CI_PIPELINE_EVENT ?? "",
+    branch: env.CI_COMMIT_BRANCH ?? "",
+    commitTag: env.CI_COMMIT_TAG ?? "",
+    commitSha: env.CI_COMMIT_SHA ?? "",
+    releaseTag: env.TB_RELEASE_TAG ?? "",
+  };
+}
+
+/** ci-v9.10 (C222): the tag + commit a Woodpecker release builds and publishes. A tag pipeline releases its own tag; a manual
+ *  pipeline on main re-releases an EXISTING tag named by TB_RELEASE_TAG (the tag was cut before the repo adopted this template).
+ *  `tagCommit` answers the commit a tag points at (null = no such tag). A tag is never created or moved. Pure. */
+export function wpReleaseTarget(e: WpReleaseEnv, tagCommit: (tag: string) => string | null): { tag: string; commit: string } | string {
+  let tag: string;
+  if (e.event === "tag") {
+    tag = e.commitTag;
+    if (e.releaseTag && e.releaseTag !== tag) return `TB_RELEASE_TAG ${e.releaseTag} != the pipeline tag ${tag}`;
+  } else if (e.event === "manual") {
+    if (e.branch !== "main") return `a manual release runs on main only (got branch ${JSON.stringify(e.branch)})`;
+    tag = e.releaseTag;
+    if (!tag) return "a manual release needs the variable TB_RELEASE_TAG=<existing tag>";
+  } else return `the Woodpecker release runs on tag and manual events only (got ${JSON.stringify(e.event)})`;
+  if (!RELEASE_TAG_RE.test(tag)) return `tag ${JSON.stringify(tag)} is not v<semver> or <package>-v<semver>`;
+  const commit = tagCommit(tag);
+  if (!commit) return `tag ${tag} does not exist (the release never creates a tag)`;
+  if (!/^[0-9a-f]{40}$/.test(commit)) return `tag ${tag}: unexpected commit ${JSON.stringify(commit)}`;
+  if (e.event === "tag" && commit !== e.commitSha) return `tag ${tag} points at ${commit}, the pipeline ran for ${e.commitSha}`;
+  return { tag, commit };
+}
+
+/** ci-v9.10 (C222): a published asset is never replaced. Same bytes = skip, other bytes = alarm, none = upload. Pure. */
+export function assetDecision(existing: Uint8Array | null, data: Uint8Array): "upload" | "same" | "conflict" {
+  if (existing === null) return "upload";
+  const h = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+  return h(existing) === h(data) ? "same" : "conflict";
+}
+
+function git(root: string, args: string[]): string {
+  return execFileSync("git", ["-c", "safe.directory=*", "-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function gitTagCommit(root: string, tag: string): string | null {
+  try {
+    return git(root, ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}^{commit}`]) || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Woodpecker release-build step (NO token): check out the tagged commit, then the same build as gh-build. */
+async function cmdWpBuild(): Promise<void> {
+  for (const k of ["GITHUB_TOKEN", "GH_TOKEN", "GHCR_TOKEN"]) if (process.env[k]) fail(`C222: wp-build must run without ${k}`);
+  const root = repoRoot();
+  const target = wpReleaseTarget(wpReleaseEnv(process.env), (tag) => gitTagCommit(root, tag));
+  if (typeof target === "string") fail(target);
+  if (git(root, ["rev-parse", "HEAD"]) !== target.commit) {
+    const dirty = git(root, ["status", "--porcelain", "--untracked-files=no"]);
+    if (dirty) fail(`the workspace has tracked changes; refusing to check out ${target.tag}:\n${dirty}`);
+    git(root, ["-c", "advice.detachedHead=false", "checkout", "--detach", "--quiet", target.commit]);
+    log(`wp-build: checked out ${target.tag} = ${target.commit} (manual re-release)`);
+  }
+  process.env.CI_COMMIT_TAG = target.tag;
+  process.env.CI_COMMIT_SHA = target.commit;
+  const cfg = loadConfig(root);
+  if (/^v\d/.test(target.tag) && cfg.images.length > 0)
+    fail("C222: images cannot be published from Woodpecker in ci-v9.10 (no GHCR credential yet); use the Actions release in a public repo");
+  wpBuildActive = true;
+  await cmdGhBuild();
+}
+
+async function ghBytes(path: string): Promise<{ status: number; data: Uint8Array }> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) fail("GITHUB_TOKEN is missing");
+  const res = await fetch(`https://api.github.com${path}`, {
+    headers: { authorization: `Bearer ${token}`, accept: "application/octet-stream", "x-github-api-version": "2022-11-28" },
+    redirect: "follow", // the asset host is another origin: fetch drops the authorization header on that hop
+  });
+  return { status: res.status, data: new Uint8Array(await res.arrayBuffer()) };
+}
+
+/** The commit a tag points at on GitHub (annotated tags followed), or null if the tag does not exist. */
+async function githubTagCommit(full: string, tag: string): Promise<string | null> {
+  const ref = await gh("GET", `/repos/${full}/git/ref/tags/${encodeURIComponent(tag)}`);
+  if (ref.status === 404) return null;
+  if (ref.status !== 200) fail(`read tag ${tag}: HTTP ${ref.status}`);
+  let obj = ref.json?.object as { type?: string; sha?: string } | undefined;
+  for (let i = 0; i < 3 && obj?.type === "tag"; i++) {
+    const t = await gh("GET", `/repos/${full}/git/tags/${obj.sha}`);
+    if (t.status !== 200) fail(`read annotated tag ${tag}: HTTP ${t.status}`);
+    obj = t.json?.object;
+  }
+  return obj?.type === "commit" && typeof obj.sha === "string" ? obj.sha : null;
+}
+
+/** Upload `name` once: never delete or replace a published asset (C222; the dist mirror alarms on changed bytes). */
+async function publishAssetOnce(full: string, rel: GhRelease, name: string, data: Buffer, contentType: string): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const list = await gh("GET", `/repos/${full}/releases/${rel.id}/assets?per_page=100`);
+    if (list.status !== 200 || !Array.isArray(list.json)) fail(`list assets of release ${rel.id}: HTTP ${list.status}`);
+    const found = (list.json as Array<{ id: number; name: string }>).find((a) => a.name === name);
+    let existing: Uint8Array | null = null;
+    if (found) {
+      const got = await ghBytes(`/repos/${full}/releases/assets/${found.id}`);
+      if (got.status !== 200) fail(`download asset ${name}: HTTP ${got.status}`);
+      existing = got.data;
+    }
+    const d = assetDecision(existing, data);
+    if (d === "same") {
+      log(`asset ${name}: already published with the same bytes; skipped`);
+      return;
+    }
+    if (d === "conflict") fail(`ALARM: asset ${name} is already published with OTHER bytes; a release asset is never replaced (cut the next version)`);
+    let target: { host: string; path: string };
+    try {
+      target = uploadTarget(rel.uploadUrl, name);
+    } catch (e) {
+      fail((e as Error).message);
+    }
+    const up = await gh("POST", target.path, undefined, { host: target.host, contentType, raw: data });
+    if (up.status === 201) return;
+    log(`upload asset ${name}: HTTP ${up.status} (attempt ${attempt}/3)`);
+    if (up.status !== 422) break; // 422 = a concurrent upload landed: re-read and compare
+    await new Promise((r) => setTimeout(r, 2000 * attempt));
+  }
+  fail(`upload asset ${name}: failed`);
+}
+
+/** Woodpecker release-publish step (repo secret tb_release_token; runs NO repo code): attach the planned tarballs. */
+async function cmdWpPublish(): Promise<void> {
+  const outEnv = process.env.TB_OUT;
+  const ws = process.env.CI_WORKSPACE;
+  if (!outEnv || !ws) fail("wp-publish needs TB_OUT and CI_WORKSPACE");
+  const real = (p: string) => (existsSync(p) ? realpathSync(p) : resolve(p));
+  const cwd = real(process.cwd());
+  const wsReal = real(ws);
+  if (cwd === wsReal || cwd.startsWith(`${wsReal}/`)) fail("wp-publish must run outside the workspace (it runs no repo code)");
+  const out = resolve(outEnv);
+  const repo = process.env.CI_REPO_NAME;
+  if (!repo || !process.env.GITHUB_TOKEN) fail(`wp-publish needs CI_REPO_NAME and the secret ${WP_RELEASE_SECRET} (as GITHUB_TOKEN)`);
+  const full = `${OWNER}/${repo}`;
+  if (process.env.CI_REPO && process.env.CI_REPO !== full) fail(`CI_REPO ${process.env.CI_REPO} != ${full}`);
+  const env = wpReleaseEnv(process.env);
+  const wanted = env.event === "manual" ? env.releaseTag : env.commitTag;
+  const onGitHub = RELEASE_TAG_RE.test(wanted) ? await githubTagCommit(full, wanted) : null;
+  const target = wpReleaseTarget(env, (t) => (t === wanted ? onGitHub : null));
+  if (typeof target === "string") fail(target);
+  const plan = JSON.parse(readFileSync(join(out, "plan.json"), "utf8")) as GhPlan;
+  if (plan.schema !== "opt2.gh-release-plan/v1" || plan.repo !== repo || plan.tag !== target.tag || plan.commit !== target.commit)
+    fail(`plan (${plan.repo} ${plan.tag} ${plan.commit}) does not match the tag on GitHub (${repo} ${target.tag} ${target.commit})`);
+  if (plan.images.length) fail("C222: images are not published from Woodpecker in ci-v9.10");
+  if (!plan.assets.length) {
+    log(`wp-publish: nothing to publish for ${target.tag}`);
+    return;
+  }
+  const prerelease = /-v?\d+\.\d+\.\d+-/.test(target.tag) || /^v\d+\.\d+\.\d+-/.test(target.tag);
+  const rel = await ensureRelease(repo, target.tag, prerelease);
+  for (const name of plan.assets) {
+    if (!KIT_NAME_RE.test(name) && !PKG_NAME_RE.test(name)) fail(`unexpected asset name ${name}`);
+    const data = readFileSync(join(out, "assets", name));
+    const sums = assetChecksums(name, data);
+    // checksum files first: the signer treats a release without the tarball as pending, never as a red run
+    for (const f of sums.files) await publishAssetOnce(full, rel, f.name, Buffer.from(f.body), "text/plain");
+    await publishAssetOnce(full, rel, name, data, "application/gzip");
+    log(`attached ${name} to ${full} ${target.tag} (sha256 ${sums.sha256}, integrity ${sums.integrity})`);
+  }
+  log(`wp-publish: done (${plan.assets.length} asset(s)); registry-sync indexes it, the dist mirror copies it`);
 }
 
 function cmdPlanImages(): void {
@@ -3370,10 +3593,21 @@ function cmdAdopt(args: string[]): void {
   mkdirSync(join(target, ".woodpecker"), { recursive: true });
   const tpl = readFileSync(join(here, "woodpecker/ci.yaml"), "utf8");
   writeFileSync(join(target, ".woodpecker/ci.yaml"), tpl);
-  if (["miniapp", "bridge", "portal", "library", "specs"].includes(kind)) {
-    // C72: releasing kinds publish through the GitHub Actions template (setup decides if it is required)
-    mkdirSync(join(target, ".github/workflows"), { recursive: true });
-    writeFileSync(join(target, GH_WORKFLOW_PATH), readFileSync(join(here, "github/opt2-release.yml"), "utf8"));
+  // ci-v9.10 (C222): a repo whose tealbrick-ci.json says "releaseOn": "woodpecker" gets .woodpecker/release.yaml and loses the
+  // Actions release workflow (one publisher per tag); every other releasing kind keeps the Actions template (C72)
+  const cfgPathEarly = join(target, "tealbrick-ci.json");
+  const onWoodpecker = existsSync(cfgPathEarly) && (JSON.parse(readFileSync(cfgPathEarly, "utf8")) as { releaseOn?: unknown }).releaseOn === "woodpecker";
+  if (onWoodpecker) {
+    writeFileSync(join(target, WP_RELEASE_PATH), readFileSync(join(here, "woodpecker/release.yaml"), "utf8"));
+    rmSync(join(target, GH_WORKFLOW_PATH), { force: true });
+    log(`releaseOn woodpecker: wrote ${WP_RELEASE_PATH}, removed ${GH_WORKFLOW_PATH} (C222)`);
+  } else {
+    rmSync(join(target, WP_RELEASE_PATH), { force: true });
+    if (["miniapp", "bridge", "portal", "library", "specs"].includes(kind)) {
+      // C72: releasing kinds publish through the GitHub Actions template (setup decides if it is required)
+      mkdirSync(join(target, ".github/workflows"), { recursive: true });
+      writeFileSync(join(target, GH_WORKFLOW_PATH), readFileSync(join(here, "github/opt2-release.yml"), "utf8"));
+    }
   }
   const ref = /TB_CI_REF: (\S+)/.exec(tpl)?.[1] ?? "main";
   const schemaUrl = `https://raw.githubusercontent.com/${OWNER}/${PLATFORM_REPO}/${ref}/ci/tealbrick-ci.schema.json`;
@@ -3406,8 +3640,10 @@ function cmdStamp(): void {
   const tpl = readFileSync(tplPath, "utf8").replaceAll(/TB_CI_SHA256: "[^"]*"/g, `TB_CI_SHA256: "${sha}"`);
   writeFileSync(tplPath, tpl);
   writeFileSync(join(here, "../.woodpecker/ci.yaml"), tpl);
-  const ghPath = join(here, "github/opt2-release.yml");
-  writeFileSync(ghPath, readFileSync(ghPath, "utf8").replaceAll(/TB_CI_SHA256: "[^"]*"/g, `TB_CI_SHA256: "${sha}"`));
+  for (const rel of ["github/opt2-release.yml", "woodpecker/release.yaml"]) {
+    const p = join(here, rel);
+    writeFileSync(p, readFileSync(p, "utf8").replaceAll(/TB_CI_SHA256: "[^"]*"/g, `TB_CI_SHA256: "${sha}"`));
+  }
   log(`stamped runner sha256 ${sha}`);
 }
 
@@ -3428,6 +3664,10 @@ async function main(argv: string[]): Promise<void> {
       return cmdGhBuild();
     case "gh-publish":
       return cmdGhPublish();
+    case "wp-build":
+      return cmdWpBuild();
+    case "wp-publish":
+      return cmdWpPublish();
     case "audit-templates":
       return cmdAuditTemplates();
     case "plan-images":
@@ -3452,7 +3692,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|pre-release|audit-templates|gh-build|gh-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|pre-release|audit-templates|gh-build|gh-publish|wp-build|wp-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
       );
   }
 }
