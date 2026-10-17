@@ -38,8 +38,9 @@ const REPOS = [
 /** C203: private repos activated here that are NOT opt2 release repos (not in OPT2_REPOS / PRIVATE_REPOS: no releases, no
  *  registry-sync, no template audit). Woodpecker visibility private (pipeline logs of proprietary code). */
 //  opt2-tealbrick-live-artifacts (C230 note, Coordinator 2026-10-17): a new mini app built privately before its first release; it
-//  moves into OPT2_REPOS (and out of this list) with the public flip and Martin's yes, before v0.1.0.
-const ACTIVATE_PRIVATE: readonly string[] = ["opt2-tealbrick-admin", "opt2-tealbrick-live-artifacts"];
+//  moves into OPT2_REPOS (and out of this list) with the public flip and Martin's yes, before v0.1.0. Same for
+//  opt2-tealbrick-observer (C169/C190, Coordinator OK 2026-10-17).
+const ACTIVATE_PRIVATE: readonly string[] = ["opt2-tealbrick-admin", "opt2-tealbrick-live-artifacts", "opt2-tealbrick-observer"];
 const ALL_REPOS = [...REPOS, ...ACTIVATE_PRIVATE];
 const CFG = join(homedir(), ".config/opt2-tealbrick");
 
