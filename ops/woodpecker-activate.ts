@@ -180,7 +180,9 @@ for (const repo of ALL_REPOS) {
     }
     const events = [...(sec.events ?? [])].sort();
     const ok = events.join(",") === [...k.events].sort().join(",") && (sec.images ?? []).length === 0;
-    console.log(`${repo} secret ${k.name}: kept (hand-made, C222) [${events.join(",")}]${ok ? "" : ` WARNING: want events [${k.events.join(",")}] and no image filter`}`);
+    console.log(
+      `${repo} secret ${k.name}: kept (hand-made, C222) [${events.join(",")}]${ok ? "" : ` WARNING: want events [${k.events.join(",")}] and no image filter`}`,
+    );
   }
   for (const sec of listed) {
     if (keep.some((k) => k.name === sec.name)) continue;
