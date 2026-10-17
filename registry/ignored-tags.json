@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "repo": "opt2-tealbrick-cli",
+    "tag": "cli-v0.2.0",
+    "reason": "pack failed (old Martin-Atrin URL of spec 0.1.26 in manifest 0.1.18); never published; superseded by cli-v0.2.1 (cli#7 a32ee53)",
+    "decision": "C222"
+  }
+]
