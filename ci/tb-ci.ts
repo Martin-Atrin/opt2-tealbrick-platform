@@ -15,6 +15,8 @@
 //   gh-build / gh-publish       (C72, GitHub Actions) build without a write token / push images + attach assets, no repo code
 //   wp-build / wp-publish       (C222, Woodpecker .woodpecker/release.yaml) the same split for private repos: build with no
 //                               token / attach assets with the repo secret tb_release_token, no repo code, never replace an asset
+//   wp-push                     (C232, ci-v9.11) push the kaniko image tarballs to ghcr with the repo secret tb_ghcr_token (crane,
+//                               hash-checked), no repo code, never overwrite a tag that points to another digest
 //   registry-add-desktop ...    (TBD release, on the Mac) add a desktop entry to the signed release index (GitHub asset URL or a platform dist host)
 //   registry-sign               re-sign the index (offers changed, or before the envelope expires)
 //   registry-add-source ...     (C29 interim) dev entry built from source at a pushed commit
@@ -23,10 +25,23 @@
 // Crypto and canonical JSON come ONLY from @opt2-tealbrick/manifest (CORE §3: one owner of primitives),
 // loaded at run time from its GitHub release tarball (TB_MANIFEST_PKG) for the registry commands.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createConnection } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gunzipSync } from "node:zlib";
@@ -790,10 +805,7 @@ export function validateConfig(raw: unknown, repoName: string): CiConfig {
     if (images.filter((x) => x.kind === "service" && x.product === im.product && x.service === im.service).length > 1)
       throw new Error(`service ${im.product}/${im.service} declared twice`);
   }
-  if (releaseOn === "woodpecker" && images.length > 0)
-    throw new Error(
-      'releaseOn "woodpecker" publishes package tarballs only in ci-v9.10; images still need the Actions release (GHCR credential, C222 follow-up)',
-    );
+  // ci-v9.11 (C232): images are allowed with releaseOn "woodpecker" (kaniko --no-push + crane push, secret tb_ghcr_token)
   return { kind, paths, conformance, images, postgres, distBaseUrl, preReleaseChecks, packScripts, releaseOn };
 }
 
@@ -2238,6 +2250,9 @@ export const GH_WORKFLOW_PATH = ".github/workflows/opt2-release.yml";
 export const WP_RELEASE_PATH = ".woodpecker/release.yaml";
 /** ci-v9.10 (C222): the Woodpecker repo secret the release-publish step (and only that step) reads. Created by Martin by hand. */
 export const WP_RELEASE_SECRET = "tb_release_token";
+/** ci-v9.11 (C232): the Woodpecker repo secret the release-image-push step (and only that step) reads: a classic PAT with
+ *  write:packages ONLY, of a machine user that can write one package (design: coordination/leads/platform/contracts/GHCR-FROM-WOODPECKER.md). */
+export const WP_GHCR_SECRET = "tb_ghcr_token";
 
 /** ci-v9.10 (C222): exactly one publisher per tag. Pure. */
 export function releaseFileProblems(releaseOn: ReleaseOn, releases: boolean, hasGhWorkflow: boolean, hasWpRelease: boolean): string[] {
@@ -2296,6 +2311,12 @@ async function cmdGhBuild(): Promise<void> {
     const full = repoFullName(repo); // C206: the repo this Action runs in; its owner's ghcr namespace is the only one it can push to
     const ns = imageNamespace(full.split("/")[0]);
     for (const im of cfg.images) {
+      if (wpBuildActive) {
+        // ci-v9.11 (C232): Woodpecker has no docker daemon: the release-image step (kaniko --no-push --tar-path) builds the tarball
+        // from the script wp-build writes at the end; the plan only names it
+        plan.images.push({ name: im.name, tar: `${im.name}.tar`, version });
+        continue;
+      }
       const ref = `${ns}/${im.name}:${version}`;
       sh(
         "docker",
@@ -2491,11 +2512,14 @@ async function cmdWpBuild(): Promise<void> {
   }
   process.env.CI_COMMIT_TAG = target.tag;
   process.env.CI_COMMIT_SHA = target.commit;
-  const cfg = loadConfig(root);
-  if (/^v\d/.test(target.tag) && cfg.images.length > 0)
-    fail("C222: images cannot be published from Woodpecker in ci-v9.10 (no GHCR credential yet); use the Actions release in a public repo");
   wpBuildActive = true;
   await cmdGhBuild();
+  // ci-v9.11 (C232): the kaniko step's script, written LAST (after every repo script ran). It holds no secret and names the tag's images.
+  const cfg = loadConfig(root);
+  const full = `${OWNER}/${repoName(root)}`;
+  const appVersion = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(target.tag)?.[1] ?? null;
+  writeFileSync(join(root, WP_IMAGE_SCRIPT), renderReleaseImagesScript(appVersion ? cfg.images : [], full, appVersion ?? "", target.commit), { mode: 0o755 });
+  log(`wp-build: wrote ${WP_IMAGE_SCRIPT} (${appVersion ? cfg.images.length : 0} image(s) for ${target.tag})`);
 }
 
 async function ghBytes(path: string): Promise<{ status: number; data: Uint8Array }> {
@@ -2566,6 +2590,7 @@ async function cmdWpPublish(): Promise<void> {
   if (cwd === wsReal || cwd.startsWith(`${wsReal}/`)) fail("wp-publish must run outside the workspace (it runs no repo code)");
   const out = resolve(outEnv);
   const repo = process.env.CI_REPO_NAME;
+  if (process.env.GHCR_TOKEN) fail(`C232: wp-publish must run without GHCR_TOKEN (the secret ${WP_GHCR_SECRET} belongs to release-image-push only)`);
   if (!repo || !process.env.GITHUB_TOKEN) fail(`wp-publish needs CI_REPO_NAME and the secret ${WP_RELEASE_SECRET} (as GITHUB_TOKEN)`);
   const full = `${OWNER}/${repo}`;
   if (process.env.CI_REPO && process.env.CI_REPO !== full) fail(`CI_REPO ${process.env.CI_REPO} != ${full}`);
@@ -2577,13 +2602,27 @@ async function cmdWpPublish(): Promise<void> {
   const plan = JSON.parse(readFileSync(join(out, "plan.json"), "utf8")) as GhPlan;
   if (plan.schema !== "opt2.gh-release-plan/v1" || plan.repo !== repo || plan.tag !== target.tag || plan.commit !== target.commit)
     fail(`plan (${plan.repo} ${plan.tag} ${plan.commit}) does not match the tag on GitHub (${repo} ${target.tag} ${target.commit})`);
-  if (plan.images.length) fail("C222: images are not published from Woodpecker in ci-v9.10");
-  if (!plan.assets.length) {
+  if (!plan.assets.length && !plan.images.length) {
     log(`wp-publish: nothing to publish for ${target.tag}`);
     return;
   }
   const prerelease = /-v?\d+\.\d+\.\d+-/.test(target.tag) || /^v\d+\.\d+\.\d+-/.test(target.tag);
   const rel = await ensureRelease(repo, target.tag, prerelease);
+  if (plan.images.length) {
+    // ci-v9.11 (C232): the images were pushed by release-image-push; the digests it wrote are data. The declared images come from the
+    // config AT THE TAG COMMIT on GitHub, never from the workspace.
+    const cfgRes = await gh("GET", `/repos/${full}/contents/tealbrick-ci.json?ref=${target.commit}`);
+    if (cfgRes.status !== 200 || typeof cfgRes.json?.content !== "string") fail(`read tealbrick-ci.json at ${target.commit}: HTTP ${cfgRes.status}`);
+    let cfg: CiConfig;
+    try {
+      cfg = validateConfig(JSON.parse(Buffer.from(cfgRes.json.content, "base64").toString("utf8")), repo);
+    } catch (e) {
+      fail(`tealbrick-ci.json at ${target.commit}: ${(e as Error).message}`);
+    }
+    const doc = await wpCandidateDoc(cfg, repo, target.tag, target.commit, plan, out);
+    if (doc === null) log("wp-publish: no app/bridge image in this release; no release-candidate.json");
+    else await publishAssetOnce(full, rel, CANDIDATE_ASSET, Buffer.from(`${JSON.stringify(doc, null, 2)}\n`), "application/json");
+  }
   for (const name of plan.assets) {
     if (!KIT_NAME_RE.test(name) && !PKG_NAME_RE.test(name)) fail(`unexpected asset name ${name}`);
     const data = readFileSync(join(out, "assets", name));
@@ -2594,6 +2633,247 @@ async function cmdWpPublish(): Promise<void> {
     log(`attached ${name} to ${full} ${target.tag} (sha256 ${sums.sha256}, integrity ${sums.integrity})`);
   }
   log(`wp-publish: done (${plan.assets.length} asset(s)); registry-sync indexes it, the dist mirror copies it`);
+}
+
+// ---------- Woodpecker image releases (C232, ci-v9.11): kaniko --no-push builds, crane pushes ----------
+// Design: coordination/leads/platform/contracts/GHCR-FROM-WOODPECKER.md. GHCR takes a push from outside Actions only with a classic
+// PAT (write:packages) of a machine user that can write ONE package. The steps (release.yaml):
+//   release-build       repo code, no secret   wp-build records the images in the plan and writes WP_IMAGE_SCRIPT (last)
+//   release-image       kaniko, no secret      builds each image from the tagged commit, linux/amd64, to .tb-ci/out/<image>.tar (no push)
+//   release-image-push  NO repo code, the ONLY step with tb_ghcr_token   wp-push (this runner, hash-checked, in /tmp)
+//   release-publish     NO repo code, the ONLY step with tb_release_token   wp-publish attaches release-candidate.json (image@digest)
+
+/** The script release-build leaves for the kaniko step (generated after all repo code ran; the step runs it with busybox sh). */
+export const WP_IMAGE_SCRIPT = ".tb-ci/release-images.sh";
+/** The release asset that names the pushed images (schema opt2.release-candidate/v1, the signer's own document). */
+export const CANDIDATE_ASSET = "release-candidate.json";
+export const KANIKO_PLATFORM = "linux/amd64";
+/** crane (go-containerregistry) release tarball for the Woodpecker agent (linux/amd64). The sha256 is the one in the release's own
+ *  checksums.txt, checked again by hand when the version changed. The runner (itself hash-checked) refuses any other bytes. */
+export const CRANE_VERSION = "v0.22.1";
+export const CRANE_URL = `https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz`;
+export const CRANE_SHA256 = "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0";
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+const IMAGE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+/** Escapes a value for the inside of a double-quoted sh string. */
+function dq(v: string): string {
+  return v.replace(/[\\"$`]/g, "\\$&");
+}
+
+/** The kaniko step's script for one tag: builds every declared image from the checked-out TAGGED commit without pushing, with the
+ *  labels the Actions path sets (source, revision, version; registry-sync's verifyImageProvenance needs source + revision). Pure. */
+export function renderReleaseImagesScript(images: readonly ImageSpec[], full: string, version: string, commit: string): string {
+  const lines = [
+    "#!/bin/sh",
+    "# generated by tb-ci wp-build (C232); runs in the kaniko debug image (busybox sh); holds no credentials; never pushes",
+    "set -eu",
+  ];
+  if (images.length === 0) {
+    lines.push('echo "tb-ci: no images for this tag; nothing to build"', "exit 0");
+    return `${lines.join("\n")}\n`;
+  }
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`bad commit ${JSON.stringify(commit)}`);
+  if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`bad version ${JSON.stringify(version)}`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/.test(full)) throw new Error(`bad repo ${JSON.stringify(full)}`);
+  const ns = imageNamespace(full.split("/")[0] as string);
+  lines.push('mkdir -p "$CI_WORKSPACE/.tb-ci/out"');
+  for (const im of images) {
+    if (!IMAGE_NAME_RE.test(im.name)) throw new Error(`bad image name ${JSON.stringify(im.name)}`);
+    lines.push(
+      `echo "tb-ci: release image ${im.name} ${version} (kaniko --no-push, ${KANIKO_PLATFORM})"`,
+      [
+        "/kaniko/executor --no-push",
+        `--context "$CI_WORKSPACE/${dq(im.context)}"`,
+        `--dockerfile "$CI_WORKSPACE/${dq(im.dockerfile)}"`,
+        `--destination ${ns}/${im.name}:${version}`,
+        `--custom-platform ${KANIKO_PLATFORM}`,
+        `--label org.opencontainers.image.source=https://github.com/${full}`,
+        `--label org.opencontainers.image.revision=${commit}`,
+        `--label org.opencontainers.image.version=${version}`,
+        `--tar-path "$CI_WORKSPACE/.tb-ci/out/${im.name}.tar"`,
+        "--cleanup --verbosity info",
+      ].join(" "),
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** The OCI labels of the single image in a `docker save` / kaniko tarball. `readEntry` returns one member of the tarball. Pure. */
+export function labelsFromImageTar(readEntry: (member: string) => Buffer): Record<string, string> {
+  const manifest = JSON.parse(readEntry("manifest.json").toString("utf8")) as unknown;
+  const config = Array.isArray(manifest) && manifest.length === 1 ? (manifest[0] as { Config?: unknown }).Config : undefined;
+  if (typeof config !== "string" || !/^[A-Za-z0-9][A-Za-z0-9:._/-]*$/.test(config) || config.includes(".."))
+    throw new Error("image tarball: manifest.json must name exactly one image with a plain config entry");
+  const labels = (JSON.parse(readEntry(config).toString("utf8")) as { config?: { Labels?: Record<string, string> | null } }).config?.Labels;
+  return labels ?? {};
+}
+
+/** What is wrong with the provenance labels of an image tarball (registry-sync checks the same two on the pushed digest). Pure. */
+export function imageLabelProblems(labels: Record<string, string>, full: string, commit: string): string[] {
+  const out: string[] = [];
+  if (labels["org.opencontainers.image.revision"] !== commit) out.push(`revision label ${labels["org.opencontainers.image.revision"]} != ${commit}`);
+  if (labels["org.opencontainers.image.source"] !== `https://github.com/${full}`)
+    out.push(`source label ${labels["org.opencontainers.image.source"]} != https://github.com/${full}`);
+  return out;
+}
+
+/** A tag is never overwritten with another image: none = push, same digest = skip (retry), other digest = alarm. Pure. */
+export function ghcrPushDecision(existing: string | null, local: string): "push" | "same" | "conflict" {
+  if (existing === null) return "push";
+  return existing === local ? "same" : "conflict";
+}
+
+/** True when crane's error says "this tag does not exist" (anything else, e.g. 401/403/5xx, is NOT proof of absence). Pure. */
+export function craneAbsent(stderr: string): boolean {
+  return /MANIFEST_UNKNOWN|NAME_UNKNOWN|Error: [^\n]*unexpected status code 404/.test(stderr);
+}
+
+export interface CraneResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+/** Runs the crane binary (no shell). `input` goes to stdin. */
+export type CraneRun = (args: string[], input?: string) => CraneResult;
+
+/** Pushes every image tarball to `<ns>/<name>:<version>` and writes `<out>/<name>.digest`. Refuses to overwrite a tag that points to
+ *  another digest. The tarballs are DATA (crane reads them; nothing from the workspace is executed). Returns one log line per image. */
+export function pushImages(o: { out: string; images: readonly { name: string; tar: string }[]; ns: string; version: string; crane: CraneRun }): string[] {
+  const lines: string[] = [];
+  for (const im of o.images) {
+    const ref = `${o.ns}/${im.name}:${o.version}`;
+    const tarPath = join(o.out, im.tar);
+    const digestFile = join(o.out, `${im.name}.digest`);
+    rmSync(digestFile, { force: true });
+    const loc = o.crane(["digest", "--tarball", tarPath]);
+    const local = loc.stdout.trim();
+    if (loc.code !== 0 || !DIGEST_RE.test(local)) throw new Error(`${im.name}: cannot read the digest of ${im.tar}: ${loc.stderr.trim().split("\n").at(-1)}`);
+    const ex = o.crane(["digest", ref]);
+    let existing: string | null = null;
+    if (ex.code === 0) {
+      existing = ex.stdout.trim();
+      if (!DIGEST_RE.test(existing)) throw new Error(`${ref}: unexpected digest answer ${JSON.stringify(existing.slice(0, 80))}`);
+    } else if (!craneAbsent(ex.stderr)) {
+      throw new Error(`${ref}: cannot tell whether the tag exists (refusing to push): ${ex.stderr.trim().split("\n").at(-1)}`);
+    }
+    const decision = ghcrPushDecision(existing, local);
+    if (decision === "conflict")
+      throw new Error(`ALARM: ${ref} already points to ${existing}, this build is ${local}; a published tag is never overwritten (cut the next version)`);
+    if (decision === "same") {
+      lines.push(`${ref}: already published with the same digest ${local}; skipped`);
+    } else {
+      const push = o.crane(["push", tarPath, ref]);
+      if (push.code !== 0) throw new Error(`${ref}: push failed: ${push.stderr.trim().split("\n").at(-1)}`);
+      const after = o.crane(["digest", ref]);
+      if (after.code !== 0 || after.stdout.trim() !== local)
+        throw new Error(`ALARM: ${ref} reads back as ${after.stdout.trim() || "(nothing)"}, expected ${local}`);
+      lines.push(`${ref}: pushed ${local}`);
+    }
+    writeFileSync(digestFile, `${local}\n`);
+  }
+  return lines;
+}
+
+/** The release-candidate document of a Woodpecker image release: the signer's own document, with the digests release-image-push wrote
+ *  next to the tarballs. The images the plan names must be exactly the images tealbrick-ci.json declares at the tag commit. */
+export async function wpCandidateDoc(
+  cfg: CiConfig,
+  repo: string,
+  tag: string,
+  commit: string,
+  plan: Pick<GhPlan, "images">,
+  out: string,
+): Promise<ReleaseCandidateDoc | null> {
+  const declared = cfg.images.map((i) => i.name).sort();
+  const planned = plan.images.map((i) => i.name).sort();
+  if (declared.join() !== planned.join())
+    throw new Error(`plan images [${planned.join(",")}] != tealbrick-ci.json images [${declared.join(",")}] at ${commit}`);
+  const ns = imageNamespace(OWNER);
+  return buildCandidateDoc(cfg, repo, tag, commit, async (name) => {
+    const file = join(out, `${name}.digest`);
+    if (!existsSync(file)) throw new Error(`no digest for image ${name} (${file}): release-image-push did not run`);
+    const digest = readFileSync(file, "utf8").trim();
+    if (!DIGEST_RE.test(digest)) throw new Error(`${file}: not a sha256 digest`);
+    return `${ns}/${name}@${digest}`;
+  });
+}
+
+function tarMember(tarPath: string): (member: string) => Buffer {
+  return (member) => execFileSync("tar", ["-xOf", tarPath, member], { maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+}
+
+/** release-image-push (secret tb_ghcr_token as GHCR_TOKEN; runs NO repo code): push the kaniko tarballs with crane. */
+async function cmdWpPush(): Promise<void> {
+  for (const k of ["GITHUB_TOKEN", "GH_TOKEN"]) if (process.env[k]) fail(`C232: wp-push must run without ${k} (the release-publish secret)`);
+  const outEnv = process.env.TB_OUT;
+  const ws = process.env.CI_WORKSPACE;
+  const repo = process.env.CI_REPO_NAME;
+  if (!outEnv || !ws || !repo) fail("wp-push needs TB_OUT, CI_WORKSPACE and CI_REPO_NAME");
+  const real = (p: string) => (existsSync(p) ? realpathSync(p) : resolve(p));
+  const cwd = real(process.cwd());
+  const wsReal = real(ws);
+  if (cwd === wsReal || cwd.startsWith(`${wsReal}/`)) fail("wp-push must run outside the workspace (it runs no repo code)");
+  const out = resolve(outEnv);
+  const full = `${OWNER}/${repo}`;
+  if (process.env.CI_REPO && process.env.CI_REPO !== full) fail(`CI_REPO ${process.env.CI_REPO} != ${full}`);
+  const env = wpReleaseEnv(process.env);
+  const plan = JSON.parse(readFileSync(join(out, "plan.json"), "utf8")) as GhPlan;
+  // The plan comes from a repo-code step, so it is only data: the tag and commit must agree with the pipeline (tag event: its own
+  // commit; manual: the plan names the commit and release-publish compares it with the tag on GitHub before it attaches anything).
+  const wanted = env.event === "manual" ? env.releaseTag : env.commitTag;
+  const target = wpReleaseTarget(env, (t) => (t === wanted ? (env.event === "tag" ? env.commitSha : plan.commit) : null));
+  if (typeof target === "string") fail(target);
+  if (plan.schema !== "opt2.gh-release-plan/v1" || plan.repo !== repo || plan.tag !== target.tag || plan.commit !== target.commit)
+    fail(`plan (${plan.repo} ${plan.tag} ${plan.commit}) does not match this run (${repo} ${target.tag} ${target.commit})`);
+  if (plan.images.length === 0) {
+    log(`wp-push: no images for ${target.tag}; nothing to push`);
+    return;
+  }
+  const token = process.env.GHCR_TOKEN;
+  if (!token) fail(`wp-push needs the secret ${WP_GHCR_SECRET} (as GHCR_TOKEN)`);
+  const version = /^v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(target.tag)?.[1];
+  if (!version) fail(`images are released on v<semver> tags only (got ${target.tag})`);
+  const seen = new Set<string>();
+  for (const im of plan.images) {
+    if (!IMAGE_NAME_RE.test(im.name) || !(im.name === repo || im.name.startsWith(`${repo}-`))) fail(`image ${im.name} does not belong to ${repo}`);
+    if (seen.has(im.name)) fail(`image ${im.name} listed twice`);
+    seen.add(im.name);
+    if (im.tar !== `${im.name}.tar` || im.version !== version) fail(`unexpected plan entry for ${im.name}: ${JSON.stringify(im)}`);
+    const st = lstatSync(join(out, im.tar), { throwIfNoEntry: false });
+    if (!st?.isFile()) fail(`${im.tar}: the kaniko step did not write a regular file`);
+    const problems = imageLabelProblems(labelsFromImageTar(tarMember(join(out, im.tar))), full, target.commit);
+    if (problems.length) fail(`${im.name}: ${problems.join("; ")} (nothing was pushed)`);
+  }
+  const tmp = mkdtempSync(join(tmpdir(), "tb-crane-")); // 0700, outside the workspace; holds the crane binary and the login, removed below
+  let problem: string | null = null;
+  try {
+    const res = await fetch(CRANE_URL);
+    if (!res.ok) throw new Error(`GET ${CRANE_URL}: HTTP ${res.status}`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    const got = createHash("sha256").update(bytes).digest("hex");
+    if (got !== CRANE_SHA256) throw new Error(`crane ${CRANE_VERSION}: sha256 ${got} != pinned ${CRANE_SHA256}`);
+    writeFileSync(join(tmp, "crane.tgz"), bytes);
+    execFileSync("tar", ["-xzf", join(tmp, "crane.tgz"), "-C", tmp, "crane"], { stdio: "pipe" });
+    chmodSync(join(tmp, "crane"), 0o755);
+    const cfgDir = join(tmp, "docker");
+    mkdirSync(cfgDir, { mode: 0o700 });
+    const childEnv = { PATH: process.env.PATH ?? "", HOME: tmp, DOCKER_CONFIG: cfgDir };
+    const crane: CraneRun = (args, input) => {
+      const r = spawnSync(join(tmp, "crane"), args, { input, encoding: "utf8", env: childEnv, maxBuffer: 16 * 1024 * 1024 });
+      return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    };
+    // the token goes to crane's stdin only: never argv, never the log, never the workspace
+    const login = crane(["auth", "login", REGISTRY_HOST, "-u", process.env.GH_ACTOR ?? OWNER, "--password-stdin"], token);
+    if (login.code !== 0) throw new Error(`crane login ${REGISTRY_HOST} failed`);
+    for (const line of pushImages({ out, images: plan.images, ns: imageNamespace(OWNER), version, crane })) log(line);
+  } catch (e) {
+    problem = (e as Error).message;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  if (problem) fail(problem);
+  log(`wp-push: done (${plan.images.length} image(s)); registry-sync verifies the labels and signs the digest`);
 }
 
 function cmdPlanImages(): void {
@@ -3156,24 +3436,24 @@ export async function ghcrFind(name: string, tag: string, fetcher: typeof fetch 
   return null;
 }
 
-/** Builds the candidate for one product tag from the repo at that commit + ghcr; null = images not published (pending). */
-async function candidateFromTag(repo: string, tag: string, commit: string, rd: RepoReader): Promise<ReleaseCandidateDoc | null> {
+/** The release candidate of one product tag, from the repo's config at the tag commit. `imageOf` answers the `ghcr.io/<ns>/<name>@sha256:…`
+ *  of a declared image (null = not published yet -> the whole document is null = pending). Shared by the signer (ghcr lookup) and,
+ *  since ci-v9.11 (C232), the Woodpecker release-publish step (digests the push step wrote), so both write the same document. */
+export async function buildCandidateDoc(
+  cfg: CiConfig,
+  repo: string,
+  tag: string,
+  commit: string,
+  imageOf: (imageName: string) => Promise<string | null>,
+): Promise<ReleaseCandidateDoc | null> {
   const version = versionFromTag(tag);
-  const cfgText = await fileAt(rd, `${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
-  if (!cfgText) return null;
-  let cfg: CiConfig;
-  try {
-    cfg = validateConfig(JSON.parse(cfgText), repo);
-  } catch {
-    return null; // tag predates the current tealbrick-ci.json schema: it cannot carry Actions-built images
-  }
   const candidates: ReleaseCandidate[] = [];
   for (const im of cfg.images.filter((x) => x.kind === "app" || x.kind === "bridge")) {
-    const image = await ghcrFind(im.name, version);
+    const image = await imageOf(im.name);
     if (!image) return null;
     const services: { id: string; image: string }[] = [];
     for (const sv of cfg.images.filter((x) => x.kind === "service" && x.product === im.product)) {
-      const svImage = await ghcrFind(sv.name, version);
+      const svImage = await imageOf(sv.name);
       if (!svImage) return null;
       services.push({ id: sv.service as string, image: svImage });
     }
@@ -3189,6 +3469,20 @@ async function candidateFromTag(repo: string, tag: string, commit: string, rd: R
     });
   }
   return candidates.length ? { schema: "opt2.release-candidate/v1", repo: `${OWNER}/${repo}`, tag, commit, candidates } : null;
+}
+
+/** Builds the candidate for one product tag from the repo at that commit + ghcr; null = images not published (pending). */
+async function candidateFromTag(repo: string, tag: string, commit: string, rd: RepoReader): Promise<ReleaseCandidateDoc | null> {
+  const version = versionFromTag(tag);
+  const cfgText = await fileAt(rd, `${OWNER}/${repo}`, commit, "tealbrick-ci.json").catch(() => null);
+  if (!cfgText) return null;
+  let cfg: CiConfig;
+  try {
+    cfg = validateConfig(JSON.parse(cfgText), repo);
+  } catch {
+    return null; // tag predates the current tealbrick-ci.json schema: it cannot carry Actions-built images
+  }
+  return buildCandidateDoc(cfg, repo, tag, commit, (name) => ghcrFind(name, version));
 }
 
 /** Platform signer pipeline (cron/manual, platform repo only, holds release_signing_key):
@@ -3668,6 +3962,8 @@ async function main(argv: string[]): Promise<void> {
       return cmdWpBuild();
     case "wp-publish":
       return cmdWpPublish();
+    case "wp-push":
+      return cmdWpPush();
     case "audit-templates":
       return cmdAuditTemplates();
     case "plan-images":
@@ -3692,7 +3988,7 @@ async function main(argv: string[]): Promise<void> {
       return cmdRegistryAddSource(rest);
     default:
       fail(
-        "usage: tb-ci setup|install|run <script>|gen|pre-release|audit-templates|gh-build|gh-publish|wp-build|wp-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
+        "usage: tb-ci setup|install|run <script>|gen|pre-release|audit-templates|gh-build|gh-publish|wp-build|wp-push|wp-publish|plan-images|release-record|package-pack|registry-add-desktop|registry-add-source|registry-sign|registry-sync|pin-tarballs|adopt|stamp",
       );
   }
 }
